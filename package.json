@@ -1,0 +1,44 @@
+{
+  "name": "dsh-deck",
+  "version": "0.1.0",
+  "description": "A terminal-native multi-agent cockpit for DeepSeek Harness. Many agents, one screen, built for Ghostty.",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "tui",
+    "ghostty",
+    "ai-agents",
+    "terminal"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "bin": {
+    "deck": "./bin/deck.js",
+    "dsh-deck": "./bin/deck.js"
+  },
+  "exports": {
+    ".": "./lib/src/index.js"
+  },
+  "files": [
+    "bin",
+    "lib",
+    "SPEC.md",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node --experimental-strip-types src/cli.ts",
+    "dev": "node --experimental-strip-types --watch src/cli.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "fake-llm": "node --experimental-strip-types src/dev/fake-llm.ts",
+    "preview": "node --experimental-strip-types src/dev/preview.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.0",
+    "typescript": "^5.9.3"
+  }
+}
