@@ -102,6 +102,7 @@ export class DeckApp {
   private messageTimer: NodeJS.Timeout | undefined
   private frameTimer: NodeJS.Timeout | undefined
   private spinnerTimer: NodeJS.Timeout | undefined
+  private progressTimer: NodeJS.Timeout | undefined
   private framePending = false
   private stopped = false
   /** Sessions whose history fetch is in flight, so focus does not refetch. */
@@ -365,6 +366,18 @@ export class DeckApp {
       return
     }
     this.store.applyHistoryPage(id, result.value.events, result.value.hasMore)
+    // The tail page carries a one-shot cut over every projection — titles,
+    // context pressure, session stats. Nothing else replays it, so a cold
+    // session would otherwise show no title until its next live projection.
+    const projections = result.value.projections
+    if (projections !== undefined) {
+      for (const [key, value] of Object.entries(projections.values)) {
+        this.store.applyMux(
+          { type: 'session/projection', sessionId: id, key, value, seq: projections.asOfSeq },
+          crypto.randomUUID(),
+        )
+      }
+    }
     this.requestFrame()
   }
 
@@ -595,8 +608,30 @@ export class DeckApp {
       this.term.progress(state === 0 ? 0 : (state as 2 | 3))
       this.lastProgress = state
     }
+    this.syncProgressHeartbeat(state)
     const label = focused === undefined ? 'deck' : `deck · ${this.titleOf(focused)}`
     this.term.title(blocked ? `${label} · approval needed` : running ? `${label} · working` : label)
+  }
+
+  /**
+   * Ghostty clears a progress bar it has not heard from in about 15 seconds, so
+   * a long quiet turn would lose its indicator even though the agent is still
+   * working. Re-assert the current state once a second, and only while there is
+   * one to assert.
+   */
+  private syncProgressHeartbeat(state: number): void {
+    if (state === 0) {
+      if (this.progressTimer !== undefined) {
+        clearInterval(this.progressTimer)
+        this.progressTimer = undefined
+      }
+      return
+    }
+    if (this.progressTimer !== undefined) return
+    this.progressTimer = setInterval(() => {
+      if (this.lastProgress === 2 || this.lastProgress === 3) this.term.progress(this.lastProgress)
+    }, 1000)
+    this.progressTimer.unref?.()
   }
 
   private notice(text: string, kind: Message['kind']): void {
@@ -617,6 +652,7 @@ export class DeckApp {
     this.stopped = true
     if (this.frameTimer !== undefined) clearTimeout(this.frameTimer)
     if (this.spinnerTimer !== undefined) clearInterval(this.spinnerTimer)
+    if (this.progressTimer !== undefined) clearInterval(this.progressTimer)
     if (this.messageTimer !== undefined) clearTimeout(this.messageTimer)
     this.term.progress(0)
     this.term.dispose()

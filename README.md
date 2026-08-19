@@ -231,14 +231,27 @@ presentation, and `src/ui/app.ts` is the only place that combines them. See
 
 ## Relationship to other work
 
-- [`@deepseek-harness-tui/dsh-tui`](https://github.com/ccch1mneyyy/dsh-TUI) is a
-  Claude-Code-style single-session TUI that mounts **inside** the harness as a
-  plugin, built on a port of Ink. Deck is the complementary shape: an
-  out-of-process **multi-session** cockpit with its own renderer. Use whichever
-  fits; they can be installed side by side.
-- [waku](https://github.com/egoist/waku) is the native-app inspiration. It has
+DeepSeek deleted its own in-tree TUI before open-sourcing, and
+[says so explicitly](https://github.com/deepseek-ai/deepseek-harness/blob/master/.agents/notes/implemented/simplification/2026-08-04-remove-tui-package.md):
+"DeepSeek Harness has no terminal UI package." Every terminal client is
+community-built, and several already exist:
+
+- [`@deepseek-harness-tui/dsh-tui`](https://github.com/ccch1mneyyy/dsh-TUI) is
+  the incumbent — a Claude-Code-style **single-session** TUI on a port of Ink,
+  moving very fast. If you want one agent in one window, use it.
+- [`@huiliyi37/dsh-tianshu-tui`](https://github.com/huiliyi37/dsh-tianshu-tui)
+  has a custom ANSI engine and already does inline Kitty/iTerm2 images.
+- [waku](https://github.com/egoist/waku) is the native-app inspiration, with
   drivers for Codex, Claude Code, ACP, OpenCode, Pi, and Amp — but none for
   DeepSeek Harness.
+
+Deck is deliberately a different shape: **out-of-process** and
+**multi-session**. That is not just an implementation detail. Every in-process
+TUI is a bundle stacked into a profile, so a bad combination can refuse to boot
+— installing one into the `web` profile has bricked people with duplicate
+service ids. Deck cannot do that: it never mounts into your profile, it talks to
+the host over HTTP and WebSockets. Your `dsh` install stays exactly as it was,
+and you can run Deck and any of the above side by side against the same host.
 
 ## Status
 

@@ -200,6 +200,15 @@ async function realSessions(baseUrl: string): Promise<{ sessions: SessionState[]
     const history = await client.call('session.history', { sessionId: summary.sessionId, maxMessages: 40 })
     const entries: readonly HistoryEntry[] = history.ok ? history.value.events : []
     store.applyHistoryPage(summary.sessionId, entries, history.ok ? history.value.hasMore : false)
+    const projections = history.ok ? history.value.projections : undefined
+    if (projections !== undefined) {
+      for (const [key, value] of Object.entries(projections.values)) {
+        store.applyMux(
+          { type: 'session/projection', sessionId: summary.sessionId, key, value, seq: projections.asOfSeq },
+          crypto.randomUUID(),
+        )
+      }
+    }
   }
   return { sessions: [...store.sessions], host: described.ok ? described.value : undefined }
 }
