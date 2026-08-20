@@ -515,3 +515,189 @@ describe('purity', () => {
     assert.notEqual(after.items, start.items)
   })
 })
+
+describe('retry visibility', () => {
+  const retryData = {
+    retryId: 'rty-1',
+    turn: 1,
+    step: 1,
+    provider: 'deepseek',
+    mode: 'normal' as const,
+    policyKey: '["normal",2,["RATE_LIMIT"],500]',
+    retry: 1,
+    maxRetries: 2,
+    delayMs: 500,
+    failure: { message: 'busy', code: 'RATE_LIMIT', status: 429 },
+  }
+
+  it('sets and increments retrying without dropping streamed blocks, then clears', () => {
+    const { ev } = fixture()
+    let state = foldAll([
+      ev('turn/start', { turn: 1 }),
+      ev('assistant/chunk', {
+        turn: 1, step: 1,
+        chunk: { type: 'text-delta', index: 0, text: 'partial' } satisfies StreamChunk,
+      }),
+    ])
+    assert.equal(ofKind(state, 'assistant')[0]?.text, 'partial')
+    assert.equal(state.retrying, undefined)
+
+    state = applyEvent(state, ev('llm/retry', retryData))
+    assert.equal(state.retrying?.count, 1)
+    assert.equal(state.retrying?.reason, 'RATE_LIMIT')
+    assert.equal(typeof state.retrying?.at, 'number')
+    assert.equal(ofKind(state, 'assistant')[0]?.text, 'partial')
+
+    state = applyEvent(state, ev('llm/retry-started', {
+      retryId: 'rty-1', turn: 1, step: 1, retry: 1,
+    }))
+    assert.equal(state.retrying?.count, 2)
+    assert.equal(state.retrying?.reason, 'RATE_LIMIT')
+
+    const replayed = applyEvent(state, {
+      type: 'llm/retry',
+      seq: state.lastSeq,
+      time: 1,
+      data: retryData,
+    })
+    assert.equal(replayed, state)
+
+    state = applyEvent(state, ev('assistant/chunk', {
+      turn: 1, step: 1,
+      chunk: { type: 'text-delta', index: 0, text: ' more' } satisfies StreamChunk,
+    }))
+    assert.equal(state.retrying, undefined)
+    assert.equal(ofKind(state, 'assistant')[0]?.text, 'partial more')
+  })
+
+  it('clears retrying on assistant/message, step/end, and turn/end', () => {
+    const { ev } = fixture()
+    let state = foldAll([
+      ev('turn/start', { turn: 1 }),
+      ev('llm/retry', retryData),
+    ])
+    assert.equal(state.retrying?.count, 1)
+
+    state = applyEvent(state, ev('assistant/message', {
+      turn: 1, step: 1,
+      message: assistantMessage([{ type: 'text', text: 'ok' }]),
+    }, { surfaceOp: 'append' }))
+    assert.equal(state.retrying, undefined)
+
+    state = applyEvent(state, ev('llm/retry', { ...retryData, retry: 2 }))
+    state = applyEvent(state, ev('step/end', { turn: 1, step: 1 }))
+    assert.equal(state.retrying, undefined)
+
+    state = applyEvent(state, ev('llm/retry', { ...retryData, retry: 3 }))
+    state = applyEvent(state, ev('turn/end', { turn: 1, reason: { kind: 'error', error: { message: 'gave up', code: 'RATE_LIMIT' } } }))
+    assert.equal(state.retrying, undefined)
+    assert.equal(state.phase, 'idle')
+  })
+})
+
+describe('images in committed messages', () => {
+  it('extracts durable attachment image blocks from user and assistant messages', () => {
+    const { ev } = fixture()
+    const userWithImage: Message = {
+      role: 'user',
+      content: [
+        {
+          type: 'image',
+          attachment: {
+            attachmentId: 'att-1',
+            mediaType: 'image/png',
+            bytes: 84,
+            width: 1,
+            height: 1,
+          },
+        },
+        { type: 'text', text: 'what is this?' },
+      ],
+      source: { kind: 'user' },
+    }
+    const state = foldAll([
+      ev('turn/start', { turn: 1 }),
+      ev('user/message', userWithImage, { surfaceOp: 'append' }),
+      ev('assistant/message', {
+        turn: 1,
+        step: 1,
+        message: assistantMessage([
+          { type: 'text', text: 'a pixel' },
+          {
+            type: 'image',
+            attachment: {
+              attachmentId: 'att-2',
+              mediaType: 'image/jpeg',
+              bytes: 12,
+              width: 2,
+              height: 2,
+            },
+          },
+        ]),
+      }, { surfaceOp: 'append' }),
+    ])
+
+    const users = ofKind(state, 'user')
+    assert.equal(users.length, 1)
+    assert.equal(users[0]?.text, 'what is this?')
+
+    const images = ofKind(state, 'image')
+    assert.equal(images.length, 2)
+    assert.equal(images[0]?.attachmentId, 'att-1')
+    assert.equal(images[0]?.mediaType, 'image/png')
+    assert.equal(images[0]?.alt, 'image (png)')
+    assert.equal(images[0]?.turn, 1)
+    assert.equal(images[0]?.step, 0)
+    assert.equal(images[1]?.attachmentId, 'att-2')
+    assert.equal(images[1]?.mediaType, 'image/jpeg')
+    assert.equal(images[1]?.alt, 'image (jpeg)')
+    assert.equal(images[1]?.turn, 1)
+    assert.equal(images[1]?.step, 1)
+  })
+})
+
+describe('turn-end elapsed and per-turn usage', () => {
+  it('records elapsedMs from turn/start time and usage for that turn only', () => {
+    const { ev } = fixture()
+    const usage1: TokenUsage = { inputTokens: 10, outputTokens: 4 }
+    const usage2: TokenUsage = { inputTokens: 7, outputTokens: 3, reasoningTokens: 2 }
+
+    let state = foldAll([
+      ev('turn/start', { turn: 1 }),
+      ev('assistant/message', {
+        turn: 1, step: 1,
+        message: assistantMessage([{ type: 'text', text: 'a' }]),
+        usage: usage1,
+      }, { surfaceOp: 'append' }),
+    ])
+    const startTime = state.turnStartedAt
+    assert.equal(typeof startTime, 'number')
+
+    const end1 = ev('turn/end', { turn: 1, reason: { kind: 'stop' } })
+    state = applyEvent(state, end1)
+    const first = ofKind(state, 'turn-end')[0]
+    assert.equal(first?.reason, 'stop')
+    assert.equal(first?.elapsedMs, end1.time - (startTime ?? 0))
+    assert.deepEqual(first?.usage, usage1)
+    assert.equal(state.usage.inputTokens, 10)
+    assert.equal(state.turnStartedAt, undefined)
+
+    state = applyEvent(state, ev('turn/start', { turn: 2 }))
+    state = applyEvent(state, ev('assistant/message', {
+      turn: 2, step: 1,
+      message: assistantMessage([{ type: 'text', text: 'b' }]),
+      usage: usage2,
+    }, { surfaceOp: 'append' }))
+    const start2 = state.turnStartedAt
+    const end2 = ev('turn/end', { turn: 2, reason: { kind: 'stop' } })
+    state = applyEvent(state, end2)
+    const ends = ofKind(state, 'turn-end')
+    assert.equal(ends.length, 2)
+    assert.equal(ends[1]?.elapsedMs, end2.time - (start2 ?? 0))
+    assert.deepEqual(ends[1]?.usage, usage2)
+    assert.equal(ends[0]?.usage?.inputTokens, 10)
+    assert.equal(state.usage.inputTokens, 17)
+    assert.equal(state.usage.outputTokens, 7)
+    assert.equal(state.usage.reasoningTokens, 2)
+  })
+})

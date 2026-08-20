@@ -5,6 +5,7 @@
 
 import { stringWidth, truncate } from '../term/width.ts'
 import type { TranscriptItem, ToolCallEntry } from '../model/fold.ts'
+import type { QueuedInboxItem, TokenUsage } from '../protocol/contract.ts'
 import type { Theme, Glyphs } from './theme.ts'
 import type { Rect } from './layout.ts'
 import {
@@ -24,6 +25,9 @@ import {
 
 export type { RenderedLine, RenderTarget } from './render.ts'
 
+/** Local stand-in until theme.glyphs grows an image mark. Do not edit theme.ts. */
+const IMAGE_GLYPH = '▣'
+
 export interface TranscriptLayoutOptions {
   width: number
   theme: Theme
@@ -32,6 +36,8 @@ export interface TranscriptLayoutOptions {
   spinnerFrame: number
   /** Render full tool arguments/results rather than a one-line summary. */
   expandTools: boolean
+  queue?: readonly QueuedInboxItem[]
+  retrying?: { count: number; reason?: string }
 }
 
 /** Pure: transcript items -> wrapped, styled lines, oldest first. */
@@ -58,6 +64,19 @@ export function layoutTranscript(
     out.push(...chunk)
     emitted += chunk.length
   }
+
+  const queue = options.queue
+  if (queue !== undefined) {
+    for (const queued of queue) {
+      out.push(layoutQueued(queued, options, width))
+    }
+  }
+
+  const retrying = options.retrying
+  if (retrying !== undefined) {
+    out.push(layoutRetrying(retrying, options, width))
+  }
+
   return out
 }
 
@@ -104,8 +123,10 @@ function layoutItem(item: TranscriptItem, options: TranscriptLayoutOptions, widt
       return layoutReasoning(item.text, item.streaming, options, width)
     case 'tool':
       return layoutTool(item.call, options, width)
+    case 'image':
+      return [layoutImage(item, options, width)]
     case 'turn-end':
-      return [ruleLine(width, item.reason, options.theme.dim, options.glyphs.hline)]
+      return [ruleLine(width, turnEndLabel(item), options.theme.dim, options.glyphs.hline)]
     case 'error':
       return hanging(
         `${options.glyphs.error} `,
@@ -121,6 +142,53 @@ function layoutItem(item: TranscriptItem, options: TranscriptLayoutOptions, widt
       return _never
     }
   }
+}
+
+function layoutImage(
+  item: Extract<TranscriptItem, { kind: 'image' }>,
+  options: TranscriptLayoutOptions,
+  width: number,
+): RenderedLine {
+  const ascii = process.env.DECK_ASCII === '1'
+  const mark = ascii ? '# ' : `${IMAGE_GLYPH} `
+  const short = mediaShort(item.mediaType)
+  const kind = short !== undefined ? `image (${short})` : 'image'
+  const text = `${mark}${kind} · ctrl+o to view`
+  return makeLine([{ text: truncate(text, width), style: options.theme.subtle }], width)
+}
+
+function layoutQueued(
+  item: QueuedInboxItem,
+  options: TranscriptLayoutOptions,
+  width: number,
+): RenderedLine {
+  const prefix = `${options.glyphs.user} (queued) `
+  const prefixW = stringWidth(prefix)
+  if (prefixW >= width) {
+    return makeLine([{ text: truncate(prefix.trimEnd(), width), style: options.theme.dim }], width)
+  }
+  const preview = truncate(queuedPreview(item), width - prefixW)
+  return makeLine(
+    [
+      { text: prefix, style: options.theme.dim },
+      { text: preview, style: options.theme.dim },
+    ],
+    width,
+  )
+}
+
+function layoutRetrying(
+  retrying: { count: number; reason?: string },
+  options: TranscriptLayoutOptions,
+  width: number,
+): RenderedLine {
+  const spin = spinnerGlyph(options.glyphs, options.spinnerFrame)
+  const head = spin.length > 0 ? `${spin} ` : ''
+  let text = `${head}retrying (${retrying.count})`
+  if (retrying.reason !== undefined && retrying.reason.length > 0) {
+    text += ` — ${retrying.reason}`
+  }
+  return makeLine([{ text: truncate(text, width), style: options.theme.warn }], width)
 }
 
 function layoutUser(text: string, options: TranscriptLayoutOptions, width: number): RenderedLine[] {
@@ -529,6 +597,72 @@ function durationLabel(call: ToolCallEntry): string | undefined {
   if (call.startedAt === undefined || call.endedAt === undefined) return undefined
   const ms = call.endedAt - call.startedAt
   if (ms < 0) return undefined
+  return formatElapsed(ms)
+}
+
+function turnEndLabel(item: Extract<TranscriptItem, { kind: 'turn-end' }>): string {
+  const parts: string[] = []
+  const reason = item.reason.trim()
+  if (reason.length > 0) parts.push(reason)
+  if (item.elapsedMs !== undefined && item.elapsedMs >= 0) parts.push(formatElapsed(item.elapsedMs))
+  const usage = formatUsage(item.usage)
+  if (usage !== undefined) parts.push(usage)
+  return parts.join(' · ')
+}
+
+function formatElapsed(ms: number): string {
   if (ms < 1000) return `${Math.round(ms)}ms`
   return `${(ms / 1000).toFixed(1)}s`
+}
+
+function formatUsage(usage: TokenUsage | undefined): string | undefined {
+  if (usage === undefined) return undefined
+  const parts: string[] = []
+  if (usage.inputTokens !== undefined) parts.push(`↑${humanizeCount(usage.inputTokens)}`)
+  if (usage.outputTokens !== undefined) parts.push(`↓${humanizeCount(usage.outputTokens)}`)
+  if (parts.length === 0) return undefined
+  return `${parts.join(' ')} tok`
+}
+
+function humanizeCount(value: number): string {
+  const sign = value < 0 ? '-' : ''
+  const n = Math.abs(value)
+  if (n < 1000) return `${sign}${Math.round(n)}`
+  if (n < 1_000_000) return `${sign}${(n / 1000).toFixed(1)}k`
+  return `${sign}${(n / 1_000_000).toFixed(1)}m`
+}
+
+function mediaShort(mediaType: string | undefined): string | undefined {
+  if (mediaType === undefined || mediaType.length === 0) return undefined
+  const slash = mediaType.lastIndexOf('/')
+  const raw = (slash >= 0 ? mediaType.slice(slash + 1) : mediaType).trim().toLowerCase()
+  return raw.length > 0 ? raw : undefined
+}
+
+function queuedPreview(item: QueuedInboxItem): string {
+  const content: unknown = item.message.content
+  return firstLine(extractContentText(content))
+}
+
+function extractContentText(content: unknown): string {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  const parts: string[] = []
+  for (const block of content) {
+    if (typeof block === 'string') {
+      parts.push(block)
+      continue
+    }
+    if (block === null || typeof block !== 'object') continue
+    const rec = block as Record<string, unknown>
+    if (typeof rec.text === 'string' && (rec.type === 'text' || rec.type === undefined)) {
+      parts.push(rec.text)
+    }
+  }
+  return parts.join('')
+}
+
+function firstLine(text: string): string {
+  const line = text.replace(/\r\n/g, '\n').split('\n')[0]
+  return line ?? ''
 }

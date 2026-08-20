@@ -373,3 +373,132 @@ describe('approvals, host frames, reset', () => {
     assert.equal(store.get('s')?.cwd, '/x')
   })
 })
+
+describe('ask-user questions', () => {
+  const questions = [
+    { id: 'q1', question: 'Ship it?', options: [{ label: 'yes' }, { label: 'no' }] },
+  ]
+
+  it('sets pendingQuestion from the envelope rpcId, bumps unread, and clears on matching resolve', async () => {
+    const store = new DeckStore()
+    store.applySessionList([summary('alpha'), summary('beta')])
+    store.focus('alpha')
+    await flush()
+    const { events, stop } = collect(store)
+
+    store.applyMux({
+      type: 'question/requested',
+      sessionId: 'beta',
+      questions,
+    }, 'rpc-q1')
+    store.applyMux({
+      type: 'question/requested',
+      sessionId: 'alpha',
+      questions,
+    }, 'rpc-q-focused')
+    await flush()
+
+    const pending = store.get('beta')?.pendingQuestion
+    assert.equal(pending?.rpcId, 'rpc-q1')
+    assert.equal(pending?.questions[0]?.id, 'q1')
+    assert.equal(typeof pending?.at, 'number')
+    assert.equal(store.get('beta')?.unread, 1)
+    assert.equal(store.get('alpha')?.unread, 0)
+    assert.equal(store.get('alpha')?.pendingQuestion?.rpcId, 'rpc-q-focused')
+    assert.ok(events.some((event) => event.kind === 'question' && event.sessionId === 'beta'))
+
+    store.applyMux({
+      type: 'question/resolved',
+      sessionId: 'beta',
+      questionRpcId: 'someone-else',
+      outcome: 'cancelled',
+    }, 'nope')
+    await flush()
+    assert.equal(store.get('beta')?.pendingQuestion?.rpcId, 'rpc-q1')
+
+    store.applyMux({
+      type: 'question/resolved',
+      sessionId: 'beta',
+      questionRpcId: 'rpc-q1',
+      outcome: 'answered',
+    }, 'rpc-done')
+    await flush()
+    assert.equal(store.get('beta')?.pendingQuestion, undefined)
+    assert.ok(events.some((event) => event.kind === 'question' && event.sessionId === 'beta'))
+    stop()
+  })
+
+  it('preserves pendingQuestion across applySessionList and clears it on resetLiveState', async () => {
+    const store = new DeckStore()
+    store.applySessionList([summary('s', { cwd: '/work' })])
+    store.applyMux({
+      type: 'question/requested',
+      sessionId: 's',
+      questions,
+    }, 'rpc-keep')
+    await flush()
+    assert.ok(store.get('s')?.pendingQuestion)
+
+    store.applySessionList([summary('s', { running: true, updatedAt: 50, cwd: '/work' })])
+    await flush()
+    assert.equal(store.get('s')?.pendingQuestion?.rpcId, 'rpc-keep')
+    assert.equal(store.get('s')?.pendingQuestion?.questions[0]?.question, 'Ship it?')
+
+    store.resetLiveState()
+    await flush()
+    assert.equal(store.get('s')?.pendingQuestion, undefined)
+    assert.equal(store.get('s')?.cwd, '/work')
+  })
+})
+
+describe('session telemetry', () => {
+  it('applies higher-seq-wins per key and ignores malformed values', async () => {
+    const store = new DeckStore()
+    store.applySessionList([summary('s')])
+    const { events, stop } = collect(store)
+
+    const frame = (key: string, value: unknown, seq: number): MuxFrame => ({
+      type: 'session/projection',
+      sessionId: 's',
+      key,
+      value,
+      seq,
+    })
+
+    store.applyMux(frame('contextPressure', { contextWindow: 128_000 }, 1), 'r')
+    store.applyMux(frame('contextBreakdown', {
+      systemTokens: 1592, toolsTokens: 6409, messageTokens: 1945,
+    }, 2), 'r')
+    store.applyMux(frame('sessionStats', {
+      turns: 1, steps: 2, llmMs: 10, toolMs: 4, ttftMs: 3, ttftSteps: 1, decodeMs: 6, decodeTokens: 20,
+    }, 3), 'r')
+    await flush()
+
+    assert.equal(store.get('s')?.telemetry.contextWindow, 128_000)
+    assert.deepEqual(store.get('s')?.telemetry.breakdown, {
+      systemTokens: 1592, toolsTokens: 6409, messageTokens: 1945,
+    })
+    assert.equal(store.get('s')?.telemetry.stats?.turns, 1)
+    assert.ok(events.some((event) => event.kind === 'status' && event.sessionId === 's'))
+
+    store.applyMux(frame('contextPressure', { contextWindow: 64_000 }, 0), 'r')
+    store.applyMux(frame('contextPressure', { contextWindow: 'nope' }, 8), 'r')
+    store.applyMux(frame('contextBreakdown', { systemTokens: 1, toolsTokens: 2 }, 9), 'r')
+    store.applyMux(frame('sessionStats', { turns: 99 }, 10), 'r')
+    store.applyMux(frame('contextBreakdown', 'not-an-object', 11), 'r')
+    await flush()
+    assert.equal(store.get('s')?.telemetry.contextWindow, 128_000)
+    assert.equal(store.get('s')?.telemetry.breakdown?.toolsTokens, 6409)
+    assert.equal(store.get('s')?.telemetry.stats?.turns, 1)
+
+    store.applyMux(frame('contextPressure', { contextWindow: 64_000 }, 12), 'r')
+    store.applyMux(frame('sessionStats', {
+      turns: 2, steps: 3, llmMs: 11, toolMs: 5, ttftMs: 3, ttftSteps: 2, decodeMs: 7, decodeTokens: 30,
+    }, 13), 'r')
+    await flush()
+    assert.equal(store.get('s')?.telemetry.contextWindow, 64_000)
+    assert.equal(store.get('s')?.telemetry.stats?.turns, 2)
+    assert.equal(store.get('s')?.telemetry.stats?.steps, 3)
+    stop()
+  })
+})

@@ -95,12 +95,13 @@ function transcriptOf(items: TranscriptItem[]): TranscriptState {
 }
 
 function syntheticSessions(): SessionState[] {
-  const base: Pick<SessionState, 'historyLoaded' | 'hasMoreHistory' | 'queue' | 'unread' | 'blank'> = {
+  const base: Pick<SessionState, 'historyLoaded' | 'hasMoreHistory' | 'queue' | 'unread' | 'blank' | 'telemetry'> = {
     historyLoaded: true,
     hasMoreHistory: false,
     queue: [],
     unread: 0,
     blank: false,
+    telemetry: {},
   }
 
   const focused: SessionState = {
@@ -261,6 +262,7 @@ async function main(): Promise<void> {
     sessionTitle: focused?.title,
     theme,
     glyphs,
+    ...focused === undefined ? {} : { telemetry: focused.telemetry },
   })
   if (layout.sidebar !== undefined) {
     renderSidebar(target, {

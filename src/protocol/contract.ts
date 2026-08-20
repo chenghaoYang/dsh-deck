@@ -164,7 +164,7 @@ export type MuxFrame =
     reason?: string
   }
   | { type: 'approval/resolved'; sessionId: SessionId; approvalId: ApprovalRequestId; outcome: ApprovalOutcome }
-  | { type: 'question/requested'; sessionId: SessionId; questions: unknown[] }
+  | { type: 'question/requested'; sessionId: SessionId; questions: AskUserQuestionItem[] }
   | { type: 'question/resolved'; sessionId: SessionId; questionRpcId: RpcId; outcome: 'answered' | 'cancelled' }
   | { type: 'session/queue'; sessionId: SessionId; items: QueuedInboxItem[] }
   | { type: 'session/jobs'; sessionId: SessionId; jobs: unknown[] }
@@ -240,6 +240,46 @@ export interface ApprovalResponsePayload {
   outcome: 'allowed-once' | 'rejected'
 }
 
+// Ask-user questions. The requested frame is a server-request whose rpcId is
+// the question's stable logical id; the answer is a client-response echoing it.
+// One ask may carry many questions, answered as one batch — never per question.
+// Mirrored from packages/interaction/user-questions/src/types.ts and
+// packages/host/apiproxy/src/api/questions.ts.
+
+export interface AskUserQuestionOption {
+  label: string
+  description?: string
+}
+
+export interface AskUserQuestionItem {
+  id: string
+  question: string
+  detail?: string
+  header?: string
+  options?: AskUserQuestionOption[]
+  /** Defaults to single-select. */
+  multiSelect?: boolean
+  /** Presentation intent for capable UIs; absent asks for the generic list. */
+  intent?: unknown
+}
+
+export interface AskUserQuestionAnswerItem {
+  id: string
+  /** Selected option labels. May accompany custom text on multi-select. */
+  selected: string[]
+  /** Free-text "Other" answer. */
+  custom?: string
+}
+
+export interface AskUserQuestionAnswer {
+  answers: AskUserQuestionAnswerItem[]
+}
+
+export interface QuestionResponsePayload {
+  sessionId: SessionId
+  answer: AskUserQuestionAnswer
+}
+
 /**
  * Method table. Deck deliberately implements a subset; the full map lives at
  * packages/host/apiproxy/src/api/rpc-map.ts upstream.
@@ -263,6 +303,14 @@ export interface RpcMethods {
   'session.rename': { payload: { sessionId: SessionId; title: string }; value: { title: string; seq: number } }
   'session.fork': { payload: { sessionId: SessionId; atSeq?: number }; value: { sessionId: SessionId } }
   'session.models': { payload: { sessionId: SessionId }; value: unknown }
+  'session.selectModel': {
+    payload: { sessionId: SessionId; provider: string; model: string; reasoningEffort?: string }
+    value: { selected: { provider: string; model: string; reasoningEffort?: string } }
+  }
+  'session.attachment': {
+    payload: { sessionId: SessionId; attachmentId: string }
+    value: { attachment: unknown; data: string }
+  }
   'session.updateQueue': { payload: { sessionId: SessionId; itemId: MessageId; action: unknown }; value: { accepted: true } }
 }
 

@@ -5,9 +5,12 @@
 
 import { stringWidth, truncate } from '../term/width.ts'
 import type { HostDescription } from '../protocol/contract.ts'
+import type { SessionTelemetry } from '../model/store.ts'
 import type { Theme, Glyphs } from './theme.ts'
 import type { Rect } from './layout.ts'
-import { type RenderTarget, type Span, paintLine, clearRect, makeLine } from './render.ts'
+import { type RenderTarget, type Span, paintLine, clearRect, makeLine, spansWidth } from './render.ts'
+
+export type { SessionTelemetry }
 
 export interface HeaderProps {
   rect: Rect
@@ -16,6 +19,7 @@ export interface HeaderProps {
   sessionTitle: string | undefined
   theme: Theme
   glyphs: Glyphs
+  telemetry?: SessionTelemetry
 }
 
 export function renderHeader(target: RenderTarget, props: HeaderProps): void {
@@ -46,9 +50,9 @@ export function renderHeader(target: RenderTarget, props: HeaderProps): void {
 
   spans.push({ text: '  ', style: '' })
   const used = spans.reduce((n, s) => n + stringWidth(s.text), 0)
-  const rightW = hostLabel.length > 0 ? stringWidth(hostLabel) : 0
-  const gap = rightW > 0 ? 2 : 0
-  const titleBudget = rect.width - used - rightW - gap
+  const hostW = hostLabel.length > 0 ? stringWidth(hostLabel) : 0
+  const hostGap = hostW > 0 ? 2 : 0
+  const titleBudget = rect.width - used - hostW - hostGap
 
   if (title.length > 0 && titleBudget > 0) {
     spans.push({ text: truncate(title, titleBudget), style: theme.text })
@@ -57,9 +61,17 @@ export function renderHeader(target: RenderTarget, props: HeaderProps): void {
   }
 
   const usedAfter = spans.reduce((n, s) => n + stringWidth(s.text), 0)
-  if (rightW > 0 && usedAfter + gap + rightW <= rect.width) {
+  const available = rect.width - usedAfter
+  const telSpans = fitTelemetry(telemetrySegments(props.telemetry, theme), available, hostW, theme.dim)
+  const telW = spansWidth(telSpans)
+  const sep = telW > 0 && hostW > 0 ? 2 : 0
+  const rightW = telW + sep + hostW
+
+  if (rightW > 0 && usedAfter + rightW <= rect.width) {
     spans.push({ text: ' '.repeat(rect.width - usedAfter - rightW), style: '' })
-    spans.push({ text: hostLabel, style: theme.subtle })
+    spans.push(...telSpans)
+    if (sep > 0) spans.push({ text: '  ', style: '' })
+    if (hostW > 0) spans.push({ text: hostLabel, style: theme.subtle })
   }
 
   paintLine(target, rect.row, rect.col, rect.width, makeLine(spans, rect.width))
@@ -142,6 +154,61 @@ function hostLabelText(host: HostDescription | undefined): string {
   const model = host.model.trim()
   if (provider.length > 0 && model.length > 0) return `${provider} · ${model}`
   return model.length > 0 ? model : provider
+}
+
+interface TelemetrySeg {
+  text: string
+  style: string
+}
+
+function telemetrySegments(telemetry: SessionTelemetry | undefined, theme: Theme): TelemetrySeg[] {
+  if (telemetry === undefined) return []
+  const segs: TelemetrySeg[] = []
+  const breakdown = telemetry.breakdown
+  const window = telemetry.contextWindow
+  if (breakdown !== undefined && window !== undefined && window > 0) {
+    const used = breakdown.systemTokens + breakdown.toolsTokens + breakdown.messageTokens
+    const pct = Math.round((used / window) * 100)
+    let style = theme.dim
+    if (pct >= 90) style = theme.error
+    else if (pct >= 75) style = theme.warn
+    segs.push({ text: `ctx ${pct}%`, style })
+  }
+  const stats = telemetry.stats
+  if (stats !== undefined) {
+    if (stats.decodeMs > 0) {
+      const rate = Math.round((stats.decodeTokens / stats.decodeMs) * 1000)
+      segs.push({ text: `${rate} tok/s`, style: theme.dim })
+    }
+    if (stats.ttftMs > 0) {
+      segs.push({ text: `ttft ${(stats.ttftMs / 1000).toFixed(1)}s`, style: theme.dim })
+    }
+  }
+  return segs
+}
+
+function joinTelemetry(segs: readonly TelemetrySeg[], dim: string): Span[] {
+  const spans: Span[] = []
+  for (let i = 0; i < segs.length; i++) {
+    const seg = segs[i]
+    if (seg === undefined) continue
+    if (i > 0) spans.push({ text: ' · ', style: dim })
+    spans.push({ text: seg.text, style: seg.style })
+  }
+  return spans
+}
+
+/** Drop telemetry segments right-to-left until the cluster fits beside the host. */
+function fitTelemetry(segs: readonly TelemetrySeg[], available: number, hostW: number, dim: string): Span[] {
+  const chosen = segs.slice()
+  while (chosen.length > 0) {
+    const spans = joinTelemetry(chosen, dim)
+    const telW = spansWidth(spans)
+    const sep = hostW > 0 ? 2 : 0
+    if (telW + sep + hostW <= available) return spans
+    chosen.pop()
+  }
+  return []
 }
 
 function hintsWidth(hints: readonly { key: string; label: string }[]): number {

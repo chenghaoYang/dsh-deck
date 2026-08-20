@@ -8,10 +8,23 @@
  */
 
 import { spawn } from 'node:child_process'
-import { createWriteStream } from 'node:fs'
+import { createWriteStream, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DeckApp } from './ui/app.ts'
+
+/** Source runs from src/, the published build from lib/src/ — probe both. */
+function packageVersion(): string {
+  for (const rel of ['../package.json', '../../package.json']) {
+    try {
+      const parsed = JSON.parse(readFileSync(new URL(rel, import.meta.url), 'utf8')) as { name?: string; version?: string }
+      if (parsed.name === 'dsh-deck' && typeof parsed.version === 'string') return parsed.version
+    } catch {
+      // keep probing
+    }
+  }
+  return 'unknown'
+}
 
 const DEFAULT_PORT = 3080
 const HOST_START_TIMEOUT_MS = 90_000
@@ -163,7 +176,7 @@ async function startHost(port: number, cwd: string): Promise<SpawnedHost> {
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2))
   if (args.help) { process.stdout.write(USAGE); return }
-  if (args.version) { process.stdout.write('dsh-deck 0.1.0\n'); return }
+  if (args.version) { process.stdout.write(`dsh-deck ${packageVersion()}\n`); return }
 
   const baseUrl = args.attach ?? `http://127.0.0.1:${String(args.port)}`
   let spawned: SpawnedHost | undefined

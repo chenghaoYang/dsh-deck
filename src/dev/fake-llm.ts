@@ -14,12 +14,39 @@ import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { parseArgs } from 'node:util'
 
-export type FakeLlmScenario = 'default' | 'tools' | 'long' | 'slow' | 'error'
+export type FakeLlmScenario = 'default' | 'tools' | 'long' | 'slow' | 'error' | 'escalate' | 'ask'
 
-const SCENARIOS: readonly FakeLlmScenario[] = ['default', 'tools', 'long', 'slow', 'error']
+const SCENARIOS: readonly FakeLlmScenario[] = ['default', 'tools', 'long', 'slow', 'error', 'escalate', 'ask']
 const TOKEN_GAP_MS = 25
 const SLOW_REASONING_MS = 8_000
 const TOOL_ARGS = JSON.stringify({ command: 'ls -la', description: 'List all files' })
+
+/** bash schema: sandbox_permissions ∈ {workspace-write, danger-full-access}; default mode is workspace-write so only danger-full-access is strictly wider. */
+export const ESCALATE_SANDBOX_PERMISSIONS = 'danger-full-access'
+export const ESCALATE_JUSTIFICATION = 'Need full access to retry a command the workspace-write sandbox would deny outside the workspace.'
+export const ESCALATE_ARGS = JSON.stringify({
+  command: 'echo escalated-outside-workspace',
+  description: 'Echo after sandbox escalation',
+  sandbox_permissions: ESCALATE_SANDBOX_PERMISSIONS,
+  justification: ESCALATE_JUSTIFICATION,
+})
+
+/** Model-facing ask_user_question args (multi_select is the schema name; mux frames use multiSelect). */
+export const ASK_QUESTION_ID = 'q_proceed'
+export const ASK_OPTION_CONTINUE = 'Continue'
+export const ASK_OPTION_STOP = 'Stop'
+export const ASK_ARGS = JSON.stringify({
+  questions: [{
+    id: ASK_QUESTION_ID,
+    question: 'Should the agent continue after this checkpoint?',
+    header: 'Confirm',
+    options: [
+      { label: ASK_OPTION_CONTINUE, description: 'Proceed with the remaining work.' },
+      { label: ASK_OPTION_STOP, description: 'Stop here and wait.' },
+    ],
+    multi_select: false,
+  }],
+})
 
 const DEFAULT_REASONING = 'The user sent a short prompt. I will answer directly without tools.'
 const DEFAULT_TEXT = [
@@ -29,6 +56,9 @@ const DEFAULT_TEXT = [
 ].join(' ')
 
 const AFTER_TOOL_TEXT = 'Listed the working directory. The bash tool call completed; here is a short wrap-up.'
+const AFTER_ESCALATE_TEXT = 'The escalation completed. The bash call finished after the approval decision.'
+const AFTER_ASK_TEXT = 'Received the user answer from ask_user_question and can continue.'
+const TITLE_TEXT = 'fake-llm session title'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
@@ -63,10 +93,44 @@ function hasToolResult(messages: unknown): boolean {
   return messages.some((message) => isRecord(message) && message.role === 'tool')
 }
 
+function extractToolMessages(messages: unknown): unknown[] {
+  if (!Array.isArray(messages)) return []
+  return messages.filter((message) => isRecord(message) && message.role === 'tool')
+}
+
+/** Auxiliary title calls embed the human prompt as JSON; they must never emit tools. */
+function isTitleRequest(messages: unknown): boolean {
+  const text = flattenUserText(messages)
+  return text.includes('Generate the session title from this JSON array of human messages')
+}
+
+/**
+ * Drive scenarios from the latest human prompt, not the whole history.
+ * dsh injects user-role snapshots (runtime context, workspace reminders, title
+ * framing) that contain words like "ask" and would steal keyword detection.
+ */
+function isInjectedUserText(text: string): boolean {
+  return text.includes('<system-reminder>')
+    || text.includes('Current runtime context. This snapshot supersedes')
+    || text.includes('Generate the session title from this JSON array of human messages')
+}
+
+function lastHumanPrompt(messages: unknown): string {
+  if (!Array.isArray(messages)) return ''
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i]
+    if (!isRecord(message) || message.role !== 'user') continue
+    const text = flattenContent(message.content)
+    if (isInjectedUserText(text)) continue
+    return text
+  }
+  return ''
+}
+
 /** Keywords in the prompt override the CLI default so a human can drive scenarios. */
 function detectScenario(messages: unknown, fallback: FakeLlmScenario): FakeLlmScenario {
-  const text = flattenUserText(messages).toLowerCase()
-  const order: FakeLlmScenario[] = ['error', 'slow', 'long', 'tools']
+  const text = lastHumanPrompt(messages).toLowerCase()
+  const order: FakeLlmScenario[] = ['error', 'slow', 'long', 'escalate', 'tools', 'ask']
   for (const name of order) {
     if (new RegExp(`\\b${name}\\b`).test(text)) return name
   }
@@ -156,7 +220,7 @@ async function streamReasoningThenText(
   emit(response, cancelled, 'data: [DONE]\n\n')
 }
 
-async function streamToolCall(
+async function streamTitle(
   response: ServerResponse,
   cancelled: () => boolean,
   id: string,
@@ -165,25 +229,52 @@ async function streamToolCall(
 ): Promise<void> {
   if (!emit(response, cancelled, chunk(id, model, created, {
     role: 'assistant',
+    content: TITLE_TEXT,
+  }, null))) return
+  if (!emit(response, cancelled, chunk(id, model, created, { content: '' }, 'stop', usageOf(8, 1, 0)))) return
+  emit(response, cancelled, 'data: [DONE]\n\n')
+}
+
+async function streamNamedToolCall(
+  response: ServerResponse,
+  cancelled: () => boolean,
+  id: string,
+  model: string,
+  created: number,
+  toolName: string,
+  argsJson: string,
+  callId: string,
+  reasoning: string,
+): Promise<void> {
+  if (!emit(response, cancelled, chunk(id, model, created, {
+    role: 'assistant',
     content: null,
     reasoning_content: '',
   }, null))) return
 
-  const mid = Math.max(1, Math.floor(TOOL_ARGS.length / 2))
+  for (const token of tokenize(reasoning)) {
+    if (!await pause(TOKEN_GAP_MS, cancelled)) return
+    if (!emit(response, cancelled, chunk(id, model, created, {
+      content: null,
+      reasoning_content: token,
+    }, null))) return
+  }
+
+  const mid = Math.max(1, Math.floor(argsJson.length / 2))
   if (!await pause(TOKEN_GAP_MS, cancelled)) return
   if (!emit(response, cancelled, chunk(id, model, created, {
     tool_calls: [{
       index: 0,
-      id: 'call_fake_bash',
+      id: callId,
       type: 'function',
-      function: { name: 'bash', arguments: TOOL_ARGS.slice(0, mid) },
+      function: { name: toolName, arguments: argsJson.slice(0, mid) },
     }],
   }, null))) return
   if (!await pause(TOKEN_GAP_MS, cancelled)) return
   if (!emit(response, cancelled, chunk(id, model, created, {
-    tool_calls: [{ index: 0, function: { arguments: TOOL_ARGS.slice(mid) } }],
+    tool_calls: [{ index: 0, function: { arguments: argsJson.slice(mid) } }],
   }, null))) return
-  if (!emit(response, cancelled, chunk(id, model, created, { content: '' }, 'tool_calls', usageOf(48, 8, 0)))) return
+  if (!emit(response, cancelled, chunk(id, model, created, { content: '' }, 'tool_calls', usageOf(48, 8, tokenize(reasoning).length)))) return
   emit(response, cancelled, 'data: [DONE]\n\n')
 }
 
@@ -243,11 +334,41 @@ async function runScenario(
   response.flushHeaders()
 
   if (scenario === 'tools' && !hasToolResult(messages)) {
-    await streamToolCall(response, cancelled, id, model, created)
+    await streamNamedToolCall(
+      response, cancelled, id, model, created,
+      'bash', TOOL_ARGS, 'call_fake_bash',
+      'I will list the working directory with bash.',
+    )
     return
   }
   if (scenario === 'tools') {
     await streamReasoningThenText(response, cancelled, id, model, created, 'The tool result is in. I will summarize.', AFTER_TOOL_TEXT, TOKEN_GAP_MS)
+    return
+  }
+  if (scenario === 'escalate' && !hasToolResult(messages)) {
+    await streamNamedToolCall(
+      response, cancelled, id, model, created,
+      'bash', ESCALATE_ARGS, 'call_fake_escalate',
+      'The sandbox will deny an out-of-workspace write. I will escalate bash to danger-full-access.',
+    )
+    return
+  }
+  if (scenario === 'escalate') {
+    await streamReasoningThenText(response, cancelled, id, model, created, 'The escalation tool result is in.', AFTER_ESCALATE_TEXT, TOKEN_GAP_MS)
+    return
+  }
+  if (scenario === 'ask' && !hasToolResult(messages)) {
+    await streamNamedToolCall(
+      response, cancelled, id, model, created,
+      'ask_user_question', ASK_ARGS, 'call_fake_ask',
+      'I need a user choice before continuing, so I will ask.',
+    )
+    return
+  }
+  if (scenario === 'ask') {
+    const toolText = JSON.stringify(extractToolMessages(messages))
+    console.error(`[fake-llm] ask follow-up received tool result: ${toolText}`)
+    await streamReasoningThenText(response, cancelled, id, model, created, 'The user answered the question.', AFTER_ASK_TEXT, TOKEN_GAP_MS)
     return
   }
   if (scenario === 'long') {
@@ -269,6 +390,13 @@ async function readBody(request: IncomingMessage): Promise<string> {
   return Buffer.concat(chunks).toString('utf8')
 }
 
+export interface FakeLlmRequestInfo {
+  scenario: FakeLlmScenario | 'title'
+  hasToolResult: boolean
+  messages: unknown
+  body: unknown
+}
+
 export interface FakeLlmServer {
   readonly port: number
   readonly url: string
@@ -278,10 +406,11 @@ export interface FakeLlmServer {
 export async function startFakeLlm(options: {
   port?: number
   scenario?: FakeLlmScenario
+  onRequest?: (info: FakeLlmRequestInfo) => void
 }): Promise<FakeLlmServer> {
   const fallback = options.scenario ?? 'default'
   const server = createServer((request, response) => {
-    void handle(request, response, fallback)
+    void handle(request, response, fallback, options.onRequest)
   })
 
   await new Promise<void>((resolve, reject) => {
@@ -308,6 +437,7 @@ async function handle(
   request: IncomingMessage,
   response: ServerResponse,
   fallback: FakeLlmScenario,
+  onRequest?: (info: FakeLlmRequestInfo) => void,
 ): Promise<void> {
   const url = new URL(request.url ?? '/', 'http://127.0.0.1')
   if (request.method === 'GET' && url.pathname === '/health') {
@@ -342,8 +472,33 @@ async function handle(
   }
 
   const messages = isRecord(body) ? body.messages : undefined
+  if (isTitleRequest(messages)) {
+    console.error(`[fake-llm] ${url.pathname} scenario=title`)
+    onRequest?.({ scenario: 'title', hasToolResult: false, messages, body })
+    response.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-cache',
+      connection: 'keep-alive',
+    })
+    response.flushHeaders()
+    const id = `chatcmpl-fake-${crypto.randomUUID()}`
+    const model = 'deepseek-v4-flash'
+    const created = Math.floor(Date.now() / 1000)
+    try {
+      await streamTitle(response, () => cancelled || response.destroyed, id, model, created)
+    } catch (error) {
+      console.error('[fake-llm] title handler failed:', error)
+    }
+    if (!response.writableEnded) response.end()
+    return
+  }
   const scenario = detectScenario(messages, fallback)
-  console.error(`[fake-llm] ${url.pathname} scenario=${scenario}`)
+  const toolFollowUp = hasToolResult(messages)
+  console.error(`[fake-llm] ${url.pathname} scenario=${scenario}${toolFollowUp ? ' follow-up' : ''}`)
+  if (toolFollowUp) {
+    console.error(`[fake-llm] follow-up tool messages: ${JSON.stringify(extractToolMessages(messages))}`)
+  }
+  onRequest?.({ scenario, hasToolResult: toolFollowUp, messages, body })
   try {
     await runScenario(scenario, messages, response, () => cancelled || response.destroyed)
   } catch (error) {

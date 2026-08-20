@@ -19,7 +19,6 @@ import type {
   HistoryEntry,
   Message,
   SessionEvent,
-  StepData,
   StreamChunk,
   TokenUsage,
   ToolCallData,
@@ -50,7 +49,8 @@ export type TranscriptItem =
   | { kind: 'reasoning'; seq: number; turn: number; step: number; text: string; streaming: boolean }
   | { kind: 'assistant'; seq: number; turn: number; step: number; text: string; streaming: boolean }
   | { kind: 'tool'; seq: number; turn: number; step: number; call: ToolCallEntry }
-  | { kind: 'turn-end'; seq: number; turn: number; reason: string }
+  | { kind: 'image'; seq: number; turn: number; step: number; attachmentId?: string; mediaType?: string; alt: string }
+  | { kind: 'turn-end'; seq: number; turn: number; reason: string; elapsedMs?: number; usage?: TokenUsage }
   | { kind: 'error'; seq: number; text: string }
   | { kind: 'notice'; seq: number; text: string }
 
@@ -62,7 +62,11 @@ export interface TranscriptState {
   usage: TokenUsage
   /** Wall-clock ms the current turn has been running, or undefined when idle. */
   turnStartedAt?: number
+  retrying?: { count: number; reason?: string; at: number }
 }
+
+/** Per-turn token accumulator. Not part of the public idle-state contract. */
+type FoldState = TranscriptState & { turnUsage?: TokenUsage }
 
 /** Types this fold understands. Anything else is unknown / future vocabulary. */
 const HANDLED_TYPES = new Set<string>([
@@ -76,6 +80,7 @@ const HANDLED_TYPES = new Set<string>([
   'tool/call',
   'tool/result',
   'llm/retry',
+  'llm/retry-started',
 ])
 
 /**
@@ -150,8 +155,9 @@ function applyEventInner(state: TranscriptState, event: SessionEvent): Transcrip
     case 'turn/end':
       return applyTurnEnd(state, event)
     case 'step/start':
-    case 'step/end':
       return bumpSeq(state, event.seq)
+    case 'step/end':
+      return bumpSeq(clearRetrying(state), event.seq)
     case 'user/message':
       return applyUserMessage(state, event)
     case 'assistant/chunk':
@@ -163,6 +169,7 @@ function applyEventInner(state: TranscriptState, event: SessionEvent): Transcrip
     case 'tool/result':
       return applyToolResult(state, event)
     case 'llm/retry':
+    case 'llm/retry-started':
       return applyRetry(state, event)
     default:
       return bumpSeq(state, event.seq)
@@ -172,13 +179,14 @@ function applyEventInner(state: TranscriptState, event: SessionEvent): Transcrip
 function applyTurnStart(state: TranscriptState, event: SessionEvent): TranscriptState {
   const data = asRecord(event.data) as TurnStartData | undefined
   const turn = asFiniteNumber(data?.turn)
-  const next: TranscriptState = {
+  const next: FoldState = {
     ...state,
     lastSeq: event.seq,
     phase: 'streaming',
     items: state.items,
     usage: state.usage,
     turnStartedAt: event.time,
+    turnUsage: {},
   }
   if (turn !== undefined) next.currentTurn = turn
   return next
@@ -207,15 +215,33 @@ function applyTurnEnd(state: TranscriptState, event: SessionEvent): TranscriptSt
     }
   }
 
-  items.push({ kind: 'turn-end', seq: event.seq, turn, reason })
+  const turnEnd: Extract<TranscriptItem, { kind: 'turn-end' }> = {
+    kind: 'turn-end',
+    seq: event.seq,
+    turn,
+    reason,
+  }
+  if (state.turnStartedAt !== undefined && Number.isFinite(event.time)) {
+    turnEnd.elapsedMs = Math.max(0, event.time - state.turnStartedAt)
+  }
+  const turnOnly = turnUsageOf(state)
+  if (hasUsage(turnOnly)) turnEnd.usage = turnOnly
+  items.push(turnEnd)
   if (data?.reason?.kind === 'error') {
     items.push({ kind: 'error', seq: event.seq, text: reason })
   }
 
-  // Drop turnStartedAt — spreading state would keep it and settle() would
-  // treat the turn as still live. SPEC: turn/end goes idle.
-  const { turnStartedAt: _ended, ...rest } = state
+  // Drop live-only fields — spreading state would keep them and settle()
+  // would treat the turn as still live. SPEC: turn/end goes idle.
+  const {
+    turnStartedAt: _ended,
+    retrying: _retry,
+    turnUsage: _used,
+    ...rest
+  } = state as FoldState
   void _ended
+  void _retry
+  void _used
   const next: TranscriptState = {
     ...rest,
     lastSeq: event.seq,
@@ -233,13 +259,17 @@ function applyUserMessage(state: TranscriptState, event: SessionEvent): Transcri
   if (isReplacementOp(event.surfaceOp)) return bumpSeq(state, event.seq)
 
   const text = messageText(event.data)
-  return settle(bumpSeq({
-    ...state,
-    items: appendItem(state.items, { kind: 'user', seq: event.seq, time: event.time, text }),
-  }, event.seq))
+  let items = appendItem(state.items, { kind: 'user', seq: event.seq, time: event.time, text })
+  const turn = state.currentTurn ?? 0
+  for (const block of messageBlocks(event.data)) {
+    const image = imageItemFromBlock(event.seq, turn, 0, block)
+    if (image !== undefined) items = appendItem(items, image)
+  }
+  return settle(bumpSeq({ ...state, items }, event.seq))
 }
 
 function applyAssistantChunk(state: TranscriptState, event: SessionEvent): TranscriptState {
+  state = clearRetrying(state)
   const data = asRecord(event.data) as AssistantChunkData | undefined
   const turn = asFiniteNumber(data?.turn)
   const step = asFiniteNumber(data?.step)
@@ -442,6 +472,7 @@ function applyBlockEnd(
 }
 
 function applyAssistantMessage(state: TranscriptState, event: SessionEvent): TranscriptState {
+  state = clearRetrying(state)
   // Model-only replacement copies (compaction) must not rewrite the human
   // transcript. Official UI matches assistant/message only via isAppendSurfaceEvent.
   if (isReplacementOp(event.surfaceOp)) return bumpSeq(state, event.seq)
@@ -464,12 +495,13 @@ function applyAssistantMessage(state: TranscriptState, event: SessionEvent): Tra
   }
 
   const items = spliceStepBlocks(state.items, turn, step, committed)
-  const next: TranscriptState = {
+  const next: FoldState = {
     ...state,
     lastSeq: event.seq,
     items,
     usage: data.usage !== undefined ? addUsage(state.usage, data.usage) : state.usage,
   }
+  if (data.usage !== undefined) next.turnUsage = addUsage(turnUsageOf(state), data.usage)
   if (state.currentTurn !== undefined) next.currentTurn = state.currentTurn
   if (state.turnStartedAt !== undefined) next.turnStartedAt = state.turnStartedAt
   return settle(next)
@@ -579,12 +611,16 @@ function applyToolResult(state: TranscriptState, event: SessionEvent): Transcrip
 }
 
 function applyRetry(state: TranscriptState, event: SessionEvent): TranscriptState {
-  const data = asRecord(event.data) as StepData | undefined
-  const turn = asFiniteNumber(data?.turn)
-  const step = asFiniteNumber(data?.step)
-  if (turn === undefined || step === undefined) return bumpSeq(state, event.seq)
-  const items = state.items.filter((item) => !isStepBlock(item, turn, step))
-  return settle(bumpSeq({ ...state, items }, event.seq))
+  const data = asRecord(event.data)
+  const reason = retryReason(data)
+  const prev = state.retrying
+  const retrying: NonNullable<TranscriptState['retrying']> = {
+    count: (prev?.count ?? 0) + 1,
+    at: event.time,
+  }
+  const kept = reason ?? prev?.reason
+  if (kept !== undefined) retrying.reason = kept
+  return settle(bumpSeq({ ...state, retrying }, event.seq))
 }
 
 function createEmptyBlock(
@@ -639,6 +675,10 @@ function blockFromContent(
       call: toolEntry({ callId, name, argumentsRaw, status: 'pending' }),
     }, index, !streaming)
   }
+  if (block.type === 'image') {
+    const image = imageItemFromBlock(seq, turn, step, block)
+    return image === undefined ? undefined : tagBlock(image, index, !streaming)
+  }
   return undefined
 }
 
@@ -651,12 +691,14 @@ function ensureOpenTurn(state: TranscriptState, event: SessionEvent, turn: numbe
     if (state.currentTurn === undefined) return { ...state, currentTurn: turn }
     return state
   }
-  return {
+  const next: FoldState = {
     ...state,
     currentTurn: turn,
     turnStartedAt: event.time,
+    turnUsage: turnUsageOf(state),
     phase: state.phase === 'idle' ? 'streaming' : state.phase,
   }
+  return next
 }
 
 function settle(state: TranscriptState): TranscriptState {
@@ -727,7 +769,7 @@ function spliceStepBlocks(
 }
 
 function isStepBlock(item: TranscriptItem, turn: number, step: number): boolean {
-  return (item.kind === 'reasoning' || item.kind === 'assistant' || item.kind === 'tool')
+  return (item.kind === 'reasoning' || item.kind === 'assistant' || item.kind === 'tool' || item.kind === 'image')
     && item.turn === turn
     && item.step === step
 }
@@ -918,4 +960,77 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 
 function asFiniteNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+function clearRetrying(state: TranscriptState): TranscriptState {
+  if (state.retrying === undefined) return state
+  const { retrying: _drop, ...rest } = state
+  void _drop
+  return rest
+}
+
+function retryReason(data: Record<string, unknown> | undefined): string | undefined {
+  if (data === undefined) return undefined
+  const failure = asRecord(data.failure)
+  if (typeof failure?.code === 'string' && failure.code !== '') return failure.code
+  if (typeof failure?.message === 'string' && failure.message !== '') return failure.message
+  if (typeof data.code === 'string' && data.code !== '') return data.code
+  return undefined
+}
+
+function turnUsageOf(state: TranscriptState): TokenUsage {
+  return (state as FoldState).turnUsage ?? {}
+}
+
+function hasUsage(usage: TokenUsage): boolean {
+  return usage.inputTokens !== undefined
+    || usage.outputTokens !== undefined
+    || usage.cacheReadTokens !== undefined
+    || usage.cacheWriteTokens !== undefined
+    || usage.reasoningTokens !== undefined
+}
+
+function imageItemFromBlock(
+  seq: number,
+  turn: number,
+  step: number,
+  block: unknown,
+): Extract<TranscriptItem, { kind: 'image' }> | undefined {
+  if (!isRecord(block) || block.type !== 'image') return undefined
+  const attachment = asRecord(block.attachment)
+  const attachmentId = firstString(
+    attachment?.attachmentId,
+    attachment?.id,
+    block.attachmentId,
+  )
+  const mediaType = firstString(
+    attachment?.mediaType,
+    block.mediaType,
+    block.mimeType,
+  )
+  const item: Extract<TranscriptItem, { kind: 'image' }> = {
+    kind: 'image',
+    seq,
+    turn,
+    step,
+    alt: imageAlt(mediaType),
+  }
+  if (attachmentId !== undefined) item.attachmentId = attachmentId
+  if (mediaType !== undefined) item.mediaType = mediaType
+  return item
+}
+
+function firstString(...candidates: unknown[]): string | undefined {
+  for (const value of candidates) {
+    if (typeof value === 'string' && value !== '') return value
+  }
+  return undefined
+}
+
+function imageAlt(mediaType: string | undefined): string {
+  if (mediaType === undefined) return 'image'
+  const slash = mediaType.lastIndexOf('/')
+  const raw = slash >= 0 ? mediaType.slice(slash + 1) : mediaType
+  const subtype = raw.split('+')[0]
+  return subtype !== undefined && subtype !== '' ? `image (${subtype})` : 'image'
 }

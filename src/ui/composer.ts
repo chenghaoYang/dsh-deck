@@ -28,16 +28,17 @@ export interface ComposerProps {
 
 /** Returns the absolute cursor position the shell should park the terminal caret at. */
 export function renderComposer(target: RenderTarget, props: ComposerProps): { row: number; col: number } {
-  const { rect, draft, mode, busy, theme } = props
+  const { rect, draft, busy, theme } = props
   clearRect(target, rect, theme.base)
   const fallback = { row: Math.max(1, rect.row), col: Math.max(1, rect.col) }
   if (rect.width <= 0 || rect.height <= 0) return fallback
 
   const ascii = process.env.DECK_ASCII === '1'
   const enter = ascii ? 'ret' : '⏎'
-  const modeText = `${mode} ${enter}`
+  const optionEnter = ascii ? 'alt+ret' : '⌥⏎'
+  const modeText = busy ? `${enter} queue · ${optionEnter} steer` : `${enter} send`
   const modeW = stringWidth(modeText)
-  const modeStyle = busy ? theme.running : theme.dim
+  const modeStyle = busy ? theme.accent : theme.dim
 
   const wrapWidth = Math.max(1, rect.width)
   const lines = wrapLines(draft, wrapWidth)

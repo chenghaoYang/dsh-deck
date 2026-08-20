@@ -12,6 +12,7 @@ import {
 } from './fold.ts'
 import type {
   ApprovalRequestId,
+  AskUserQuestionItem,
   CallId,
   HistoryEntry,
   HostFrame,
@@ -36,10 +37,12 @@ export interface SessionState {
   historyLoaded: boolean
   hasMoreHistory: boolean
   pendingApproval?: PendingApproval
+  pendingQuestion?: PendingQuestion
   queue: QueuedInboxItem[]
   /** Unseen activity since the user last focused this session. */
   unread: number
   lastError?: string
+  telemetry: SessionTelemetry
 }
 
 export interface PendingApproval {
@@ -51,10 +54,23 @@ export interface PendingApproval {
   at: number
 }
 
+export interface PendingQuestion {
+  rpcId: RpcId
+  questions: AskUserQuestionItem[]
+  at: number
+}
+
+export interface SessionTelemetry {
+  contextWindow?: number
+  breakdown?: { systemTokens: number; toolsTokens: number; messageTokens: number }
+  stats?: { turns: number; steps: number; llmMs: number; toolMs: number; ttftMs: number; ttftSteps: number; decodeMs: number; decodeTokens: number }
+}
+
 export type StoreChange =
   | { kind: 'sessions' }
   | { kind: 'transcript'; sessionId: SessionId }
   | { kind: 'approval'; sessionId: SessionId }
+  | { kind: 'question'; sessionId: SessionId }
   | { kind: 'status'; sessionId: SessionId }
 
 export class DeckStore {
@@ -117,7 +133,11 @@ export class DeckStore {
         this.applyProjection(frame.sessionId, frame.key, frame.value, frame.seq)
         return
       case 'question/requested':
+        this.applyQuestionRequested(frame, rpcId)
+        return
       case 'question/resolved':
+        this.applyQuestionResolved(frame)
+        return
       case 'session/jobs':
       case 'stream/error':
         return
@@ -171,6 +191,7 @@ export class DeckStore {
         hasMoreHistory: prev?.hasMoreHistory ?? false,
         queue: prev?.queue ?? [],
         unread: prev?.unread ?? 0,
+        telemetry: prev?.telemetry ?? {},
       }
       copyOptional(next, prev, item)
       this.byId.set(item.sessionId, next)
@@ -211,6 +232,7 @@ export class DeckStore {
         hasMoreHistory: session.hasMoreHistory,
         queue: [],
         unread: session.unread,
+        telemetry: session.telemetry,
       }
       if (session.title !== undefined) next.title = session.title
       if (session.cwd !== undefined) next.cwd = session.cwd
@@ -307,17 +329,60 @@ export class DeckStore {
     if (transcript !== session.transcript) this.emit({ kind: 'transcript', sessionId: frame.sessionId })
   }
 
+  private applyQuestionRequested(
+    frame: Extract<MuxFrame, { type: 'question/requested' }>,
+    rpcId: RpcId,
+  ): void {
+    const session = this.ensure(frame.sessionId)
+    const pending: PendingQuestion = {
+      rpcId,
+      questions: frame.questions.slice(),
+      at: Date.now(),
+    }
+    const next: SessionState = { ...session, pendingQuestion: pending, updatedAt: pending.at }
+    if (this.focusedId !== frame.sessionId) next.unread = session.unread + 1
+    this.byId.set(frame.sessionId, next)
+    this.emit({ kind: 'question', sessionId: frame.sessionId })
+    if (next.unread !== session.unread) this.emit({ kind: 'sessions' })
+  }
+
+  private applyQuestionResolved(
+    frame: Extract<MuxFrame, { type: 'question/resolved' }>,
+  ): void {
+    const session = this.byId.get(frame.sessionId)
+    if (session === undefined) return
+    if (session.pendingQuestion?.rpcId !== frame.questionRpcId) return
+    const { pendingQuestion: _drop, ...rest } = session
+    void _drop
+    this.byId.set(frame.sessionId, { ...rest, queue: rest.queue, telemetry: rest.telemetry })
+    this.emit({ kind: 'question', sessionId: frame.sessionId })
+  }
+
   private applyProjection(sessionId: SessionId, key: string, value: unknown, seq: number): void {
-    if (!key.toLowerCase().includes('title')) return
+    const isTitle = key.toLowerCase().includes('title')
+    const isTelemetry = key === 'contextPressure' || key === 'contextBreakdown' || key === 'sessionStats'
+    if (!isTitle && !isTelemetry) return
     const cell = `${sessionId}\0${key}`
     const prev = this.projections.get(cell)
     if (prev !== undefined && seq <= prev.seq) return
     this.projections.set(cell, { seq, value })
-    if (typeof value !== 'string') return
+    if (isTitle) {
+      if (typeof value !== 'string') return
+      const session = this.ensure(sessionId)
+      if (session.title === value) return
+      this.byId.set(sessionId, { ...session, title: value })
+      this.emit({ kind: 'sessions' })
+      return
+    }
+    this.applyTelemetryProjection(sessionId, key, value)
+  }
+
+  private applyTelemetryProjection(sessionId: SessionId, key: string, value: unknown): void {
     const session = this.ensure(sessionId)
-    if (session.title === value) return
-    this.byId.set(sessionId, { ...session, title: value })
-    this.emit({ kind: 'sessions' })
+    const telemetry = applyTelemetryKey(session.telemetry, key, value)
+    if (telemetry === undefined || telemetry === session.telemetry) return
+    this.byId.set(sessionId, { ...session, telemetry })
+    this.emit({ kind: 'status', sessionId })
   }
 
   private mergeAdded(frame: Extract<HostFrame, { type: 'host/session-added' }>): void {
@@ -332,6 +397,7 @@ export class DeckStore {
       hasMoreHistory: prev?.hasMoreHistory ?? false,
       queue: prev?.queue ?? [],
       unread: prev?.unread ?? 0,
+      telemetry: prev?.telemetry ?? {},
     }
     copyOptional(next, prev, frame)
     this.byId.set(frame.sessionId, next)
@@ -351,6 +417,7 @@ export class DeckStore {
       hasMoreHistory: false,
       queue: [],
       unread: 0,
+      telemetry: {},
     }
     this.byId.set(id, created)
     this.emit({ kind: 'sessions' })
@@ -441,5 +508,111 @@ function copyOptional(
   if (src.title !== undefined) next.title = src.title
   else if (prev?.title !== undefined) next.title = prev.title
   if (prev?.pendingApproval !== undefined) next.pendingApproval = prev.pendingApproval
+  if (prev?.pendingQuestion !== undefined) next.pendingQuestion = prev.pendingQuestion
   if (prev?.lastError !== undefined) next.lastError = prev.lastError
+  if (prev?.telemetry !== undefined) next.telemetry = prev.telemetry
+}
+
+function applyTelemetryKey(
+  current: SessionTelemetry,
+  key: string,
+  value: unknown,
+): SessionTelemetry | undefined {
+  if (key === 'contextPressure') {
+    const window = parseContextWindow(value)
+    if (window === undefined) return undefined
+    if (window === current.contextWindow) return current
+    if (window === false) {
+      if (current.contextWindow === undefined) return current
+      const { contextWindow: _drop, ...rest } = current
+      void _drop
+      return rest
+    }
+    return { ...current, contextWindow: window }
+  }
+  if (key === 'contextBreakdown') {
+    const breakdown = parseBreakdown(value)
+    if (breakdown === undefined) return undefined
+    if (sameBreakdown(current.breakdown, breakdown)) return current
+    return { ...current, breakdown }
+  }
+  if (key === 'sessionStats') {
+    const stats = parseStats(value)
+    if (stats === undefined) return undefined
+    if (sameStats(current.stats, stats)) return current
+    return { ...current, stats }
+  }
+  return undefined
+}
+
+/** `false` = valid object without a window (clear); `undefined` = malformed. */
+function parseContextWindow(value: unknown): number | false | undefined {
+  if (!isPlainRecord(value)) return undefined
+  if (!('contextWindow' in value)) return false
+  const window = value.contextWindow
+  return typeof window === 'number' && Number.isFinite(window) ? window : undefined
+}
+
+function parseBreakdown(value: unknown): SessionTelemetry['breakdown'] | undefined {
+  if (!isPlainRecord(value)) return undefined
+  const systemTokens = asFiniteNumber(value.systemTokens)
+  const toolsTokens = asFiniteNumber(value.toolsTokens)
+  const messageTokens = asFiniteNumber(value.messageTokens)
+  if (systemTokens === undefined || toolsTokens === undefined || messageTokens === undefined) {
+    return undefined
+  }
+  return { systemTokens, toolsTokens, messageTokens }
+}
+
+function parseStats(value: unknown): SessionTelemetry['stats'] | undefined {
+  if (!isPlainRecord(value)) return undefined
+  const turns = asFiniteNumber(value.turns)
+  const steps = asFiniteNumber(value.steps)
+  const llmMs = asFiniteNumber(value.llmMs)
+  const toolMs = asFiniteNumber(value.toolMs)
+  const ttftMs = asFiniteNumber(value.ttftMs)
+  const ttftSteps = asFiniteNumber(value.ttftSteps)
+  const decodeMs = asFiniteNumber(value.decodeMs)
+  const decodeTokens = asFiniteNumber(value.decodeTokens)
+  if (
+    turns === undefined || steps === undefined || llmMs === undefined || toolMs === undefined
+    || ttftMs === undefined || ttftSteps === undefined || decodeMs === undefined
+    || decodeTokens === undefined
+  ) {
+    return undefined
+  }
+  return { turns, steps, llmMs, toolMs, ttftMs, ttftSteps, decodeMs, decodeTokens }
+}
+
+function sameBreakdown(
+  a: SessionTelemetry['breakdown'] | undefined,
+  b: NonNullable<SessionTelemetry['breakdown']>,
+): boolean {
+  return a !== undefined
+    && a.systemTokens === b.systemTokens
+    && a.toolsTokens === b.toolsTokens
+    && a.messageTokens === b.messageTokens
+}
+
+function sameStats(
+  a: SessionTelemetry['stats'] | undefined,
+  b: NonNullable<SessionTelemetry['stats']>,
+): boolean {
+  return a !== undefined
+    && a.turns === b.turns
+    && a.steps === b.steps
+    && a.llmMs === b.llmMs
+    && a.toolMs === b.toolMs
+    && a.ttftMs === b.ttftMs
+    && a.ttftSteps === b.ttftSteps
+    && a.decodeMs === b.decodeMs
+    && a.decodeTokens === b.decodeTokens
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function asFiniteNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
 }

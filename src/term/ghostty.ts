@@ -125,6 +125,16 @@ export class TerminalIntegration {
   }
 
   /**
+   * Kitty graphics: delete every visible placement and free its data
+   * (`a=d,d=A`). Used when an image overlay closes, so the cells underneath
+   * repaint cleanly on the next frame.
+   */
+  clearImages(): void {
+    if (!this.#caps.kittyGraphics) return
+    this.#write('\u001b_Ga=d,d=A\u001b\\')
+  }
+
+  /**
    * OSC 0 title. Always emitted (sanitized): unknown OSC is ignored, not painted.
    * VERIFIED-SUPPORTED Ghostty 1.3: VT reference OSC 0/2.
    */

@@ -25,6 +25,22 @@ import { renderSidebar } from './sidebar.ts'
 import { renderComposer } from './composer.ts'
 import { renderFooter, renderHeader } from './statusbar.ts'
 import { renderHelp } from './help.ts'
+import {
+  createPickerOverlay,
+  createQuestionOverlay,
+  layoutImageOverlay,
+  reducePickerOverlay,
+  reduceQuestionOverlay,
+  renderImageOverlayChrome,
+  renderPickerOverlay,
+  renderQuestionOverlay,
+  type ImageOverlayLayout,
+  type PickerModel,
+  type PickerOverlayState,
+  type QuestionOverlayState,
+} from './overlay.ts'
+import type { AskUserQuestionAnswer, RpcId } from '../protocol/contract.ts'
+import { cursorTo } from '../term/ansi.ts'
 
 /** Frame budget. 24fps is plenty for text and leaves the CPU alone while idle. */
 const FRAME_INTERVAL_MS = 42
@@ -43,6 +59,16 @@ const APPROVAL_HINTS = [
   { key: 'r', label: 'reject' },
 ]
 
+const QUESTION_HINTS = [
+  { key: '⏎', label: 'answer the question' },
+]
+
+/** One modal at a time; while it exists it owns the keyboard. */
+type Overlay =
+  | { kind: 'question'; sessionId: SessionId; rpcId: RpcId; state: QuestionOverlayState }
+  | { kind: 'picker'; sessionId: SessionId; state: PickerOverlayState }
+  | { kind: 'image'; alt: string; data: Uint8Array; transmitted: boolean; layout?: ImageOverlayLayout }
+
 const BINDINGS = [
   { keys: 'type anything', label: 'goes to the composer — letters are never commands' },
   { keys: 'enter', label: 'send (queues behind the running turn)' },
@@ -50,6 +76,8 @@ const BINDINGS = [
   { keys: 'tab', label: 'next session' },
   { keys: 'alt+1 … alt+9', label: 'jump to a session' },
   { keys: 'ctrl+n', label: 'new session in the current directory' },
+  { keys: 'ctrl+p', label: 'pick the model and reasoning effort' },
+  { keys: 'ctrl+o', label: 'view the latest image inline (Kitty graphics)' },
   { keys: 'ctrl+f', label: 'fork the focused session' },
   { keys: 'ctrl+c', label: 'cancel the running turn, or quit when idle' },
   { keys: 'ctrl+d', label: 'quit' },
@@ -99,6 +127,7 @@ export class DeckApp {
   private showHelp = false
   private expandTools = false
   private message: Message | undefined
+  private overlay: Overlay | undefined
   private messageTimer: NodeJS.Timeout | undefined
   private frameTimer: NodeJS.Timeout | undefined
   private spinnerTimer: NodeJS.Timeout | undefined
@@ -195,6 +224,28 @@ export class DeckApp {
         this.term.notify('Approval needed', `${pending.pendingApproval?.toolName ?? 'tool'} in ${this.titleOf(pending)}`)
       }
     }
+    if (kind === 'question') {
+      const pending = this.store.sessions.find((s) => s.pendingQuestion !== undefined)
+      if (pending !== undefined) {
+        this.term.notify('Question from agent', this.titleOf(pending))
+        this.maybeOpenQuestion()
+      }
+    }
+    this.requestFrame()
+  }
+
+  /** Auto-open the question overlay for the focused session, unless a modal is already up. */
+  private maybeOpenQuestion(): void {
+    if (this.overlay !== undefined) return
+    const focused = this.focused()
+    const pending = focused?.pendingQuestion
+    if (focused === undefined || pending === undefined) return
+    this.overlay = {
+      kind: 'question',
+      sessionId: focused.id,
+      rpcId: pending.rpcId,
+      state: createQuestionOverlay(pending.questions),
+    }
     this.requestFrame()
   }
 
@@ -211,6 +262,12 @@ export class DeckApp {
    * draft. Awaiting first let several keys observe the same stale draft.
    */
   private onKey(key: Key): void {
+    // A modal overlay owns the keyboard outright.
+    if (this.overlay !== undefined) {
+      this.onOverlayKey(this.overlay, key)
+      return
+    }
+
     // The approval overlay grabs input: a blocked agent is the one thing worth
     // stealing the keyboard for, and it makes allow/reject a single keystroke.
     if (this.pendingApprovalTarget() !== undefined && this.answerKey(key)) return
@@ -275,8 +332,114 @@ export class DeckApp {
       case 'a': this.cursor = 0; this.requestFrame(); return
       case 'w': this.deleteWord(); return
       case 'l': this.scrollOffset = 0; this.requestFrame(); return
+      case 'p': void this.openPicker(); return
+      case 'o': void this.openLatestImage(); return
       default: return
     }
+  }
+
+  // -- overlays --------------------------------------------------------------
+
+  private onOverlayKey(overlay: Overlay, key: Key): void {
+    if (overlay.kind === 'question') {
+      const result = reduceQuestionOverlay(overlay.state, key)
+      if (result.kind === 'continue') {
+        this.overlay = { ...overlay, state: result.state }
+      } else if (result.kind === 'answered') {
+        this.overlay = undefined
+        void this.respondQuestion(overlay.sessionId, overlay.rpcId, result.answer)
+      } else {
+        // The question stays pending on the host; enter reopens the card.
+        this.overlay = undefined
+        this.notice('question left unanswered — press enter to reopen', 'warn')
+      }
+      this.requestFrame()
+      return
+    }
+    if (overlay.kind === 'picker') {
+      const result = reducePickerOverlay(overlay.state, key)
+      if (result.kind === 'continue') {
+        this.overlay = { ...overlay, state: result.state }
+      } else if (result.kind === 'picked') {
+        this.overlay = undefined
+        void this.applyModelSelection(overlay.sessionId, result.selection)
+      } else {
+        this.overlay = undefined
+      }
+      this.requestFrame()
+      return
+    }
+    // image viewer
+    if (key.kind === 'escape' || (key.kind === 'char' && key.char.toLowerCase() === 'q')) {
+      this.term.clearImages()
+      this.overlay = undefined
+      this.requestFrame()
+      return
+    }
+    if (key.kind === 'char' && key.char.toLowerCase() === 'y') {
+      this.term.copy(overlay.alt)
+      this.notice('copied', 'info')
+    }
+  }
+
+  private async respondQuestion(sessionId: SessionId, rpcId: RpcId, answer: AskUserQuestionAnswer): Promise<void> {
+    const receipt = await this.client.respond(rpcId, { sessionId, answer })
+    if (!receipt.accepted) this.notice(`answer not accepted: ${receipt.reason}`, 'warn')
+    else this.notice('answered', 'info')
+  }
+
+  private async openPicker(): Promise<void> {
+    const focused = this.focused()
+    if (focused === undefined || this.overlay !== undefined) return
+    const result = await this.client.call('session.models', { sessionId: focused.id })
+    if (!result.ok) {
+      this.notice(`models unavailable: ${result.error.message}`, 'error')
+      return
+    }
+    const models = mapModelCatalog(result.value)
+    if (models.length === 0) {
+      this.notice('the host advertises no models', 'warn')
+      return
+    }
+    this.overlay = { kind: 'picker', sessionId: focused.id, state: createPickerOverlay(models) }
+    this.requestFrame()
+  }
+
+  private async applyModelSelection(
+    sessionId: SessionId,
+    selection: { provider: string; model: string; reasoningEffort?: string },
+  ): Promise<void> {
+    const result = await this.client.call('session.selectModel', { sessionId, ...selection })
+    if (!result.ok) this.notice(`model change failed: ${result.error.message}`, 'error')
+    else this.notice(`model: ${result.value.selected.provider} · ${result.value.selected.model}`, 'info')
+  }
+
+  private async openLatestImage(): Promise<void> {
+    const focused = this.focused()
+    if (focused === undefined || this.overlay !== undefined) return
+    const items = focused.transcript.items
+    let image: { attachmentId?: string; alt: string } | undefined
+    for (let i = items.length - 1; i >= 0; i -= 1) {
+      const item = items[i]
+      if (item !== undefined && item.kind === 'image') {
+        image = { ...item.attachmentId === undefined ? {} : { attachmentId: item.attachmentId }, alt: item.alt }
+        break
+      }
+    }
+    if (image === undefined) { this.notice('no image in this session', 'info'); return }
+    if (!this.caps.kittyGraphics) { this.notice('this terminal cannot render images (try Ghostty)', 'warn'); return }
+    if (image.attachmentId === undefined) { this.notice('image has no durable attachment', 'warn'); return }
+    const result = await this.client.call('session.attachment', {
+      sessionId: focused.id,
+      attachmentId: image.attachmentId,
+    })
+    if (!result.ok) {
+      this.notice(`attachment fetch failed: ${result.error.message}`, 'error')
+      return
+    }
+    const data = Uint8Array.from(Buffer.from(result.value.data, 'base64'))
+    this.overlay = { kind: 'image', alt: image.alt, data, transmitted: false }
+    this.requestFrame()
   }
 
   /** Returns the session whose approval should be answered, preferring the focused one. */
@@ -350,6 +513,7 @@ export class DeckApp {
     this.store.focus(id)
     this.scrollOffset = 0
     void this.loadHistory(id)
+    this.maybeOpenQuestion()
     this.requestFrame()
   }
 
@@ -394,6 +558,12 @@ export class DeckApp {
   private async send(mode: 'queue' | 'steer'): Promise<void> {
     const text = this.draft.trim()
     const focused = this.focused()
+    // Enter on an empty draft reopens a dismissed question card instead of
+    // being a no-op: the agent is blocked until it gets an answer.
+    if (text === '' && focused?.pendingQuestion !== undefined) {
+      this.maybeOpenQuestion()
+      return
+    }
     if (text === '' || focused === undefined) return
     this.draft = ''
     this.cursor = 0
@@ -518,6 +688,7 @@ export class DeckApp {
       sessionTitle: focused === undefined ? undefined : this.titleOf(focused),
       theme: this.theme,
       glyphs: this.glyphs,
+      ...focused === undefined ? {} : { telemetry: focused.telemetry },
     })
 
     if (layout.sidebar !== undefined) {
@@ -536,12 +707,15 @@ export class DeckApp {
 
     let lines: readonly RenderedLine[] = []
     if (focused !== undefined) {
+      const retrying = focused.transcript.retrying
       lines = layoutTranscript(focused.transcript.items, {
         width: layout.transcript.width,
         theme: this.theme,
         glyphs: this.glyphs,
         spinnerFrame: this.spinnerFrame,
         expandTools: this.expandTools,
+        queue: focused.queue,
+        ...retrying === undefined ? {} : { retrying: { count: retrying.count, ...retrying.reason === undefined ? {} : { reason: retrying.reason } } },
       })
     }
     const { maxScroll } = renderTranscript(this.screen, {
@@ -563,10 +737,15 @@ export class DeckApp {
       glyphs: this.glyphs,
     })
 
+    const focusedForHints = this.focused()
     renderFooter(this.screen, {
       rect: layout.footer,
       // The hint row is how the user learns the keyboard has changed mode.
-      hints: this.pendingApprovalTarget() === undefined ? KEY_HINTS : APPROVAL_HINTS,
+      hints: this.pendingApprovalTarget() !== undefined
+        ? APPROVAL_HINTS
+        : focusedForHints?.pendingQuestion !== undefined && this.overlay === undefined
+          ? QUESTION_HINTS
+          : KEY_HINTS,
       message: this.message,
       theme: this.theme,
     })
@@ -575,7 +754,31 @@ export class DeckApp {
       renderHelp(this.screen, layout.transcript, this.theme, BINDINGS)
     }
 
+    let imageLayout: ImageOverlayLayout | undefined
+    if (this.overlay !== undefined) {
+      if (this.overlay.kind === 'question') {
+        renderQuestionOverlay(this.screen, layout.transcript, this.overlay.state, this.theme, this.glyphs)
+      } else if (this.overlay.kind === 'picker') {
+        renderPickerOverlay(this.screen, layout.transcript, this.overlay.state, this.theme, this.glyphs)
+      } else {
+        imageLayout = this.overlay.layout ?? layoutImageOverlay(layout.transcript, this.overlay.alt)
+        this.overlay.layout = imageLayout
+        renderImageOverlayChrome(this.screen, imageLayout, this.theme, this.glyphs)
+      }
+    }
+
     this.screen.end()
+
+    // Kitty graphics ride outside the cell diff: transmit once, after the
+    // chrome frame has been flushed, at the panel's inner origin.
+    if (this.overlay !== undefined && this.overlay.kind === 'image' && !this.overlay.transmitted && imageLayout !== undefined) {
+      this.overlay.transmitted = true
+      process.stdout.write(cursorTo(imageLayout.imageCell.row, imageLayout.imageCell.col))
+      this.term.image(this.overlay.data, {
+        columns: imageLayout.imageCell.columns,
+        rows: imageLayout.imageCell.rows,
+      })
+    }
     void caret
   }
 
@@ -655,6 +858,7 @@ export class DeckApp {
     if (this.progressTimer !== undefined) clearInterval(this.progressTimer)
     if (this.messageTimer !== undefined) clearTimeout(this.messageTimer)
     this.term.progress(0)
+    if (this.overlay?.kind === 'image') this.term.clearImages()
     this.term.dispose()
     this.input.stop()
     this.connection.close()
@@ -689,4 +893,51 @@ export class DeckApp {
     }
     out.write('\n')
   }
+}
+
+/**
+ * Map the host's advisory model directory onto the picker's structural input.
+ * Shape verified against a live rc.7 host:
+ * `{ current: {provider, model}, groups: [{ id, name, models: [{ id, name,
+ * reasoning?: { efforts: [{id, name}], defaultEffort? } }] }] }`.
+ * Defensive throughout — the value is typed unknown on the wire.
+ */
+function mapModelCatalog(value: unknown): PickerModel[] {
+  if (typeof value !== 'object' || value === null) return []
+  const root = value as { current?: unknown; groups?: unknown }
+  const current = (typeof root.current === 'object' && root.current !== null)
+    ? root.current as { provider?: unknown; model?: unknown }
+    : undefined
+  if (!Array.isArray(root.groups)) return []
+  const out: PickerModel[] = []
+  for (const group of root.groups) {
+    if (typeof group !== 'object' || group === null) continue
+    const g = group as { id?: unknown; name?: unknown; models?: unknown }
+    if (typeof g.id !== 'string' || !Array.isArray(g.models)) continue
+    for (const model of g.models) {
+      if (typeof model !== 'object' || model === null) continue
+      const m = model as { id?: unknown; name?: unknown; reasoning?: unknown }
+      if (typeof m.id !== 'string') continue
+      const reasoning = (typeof m.reasoning === 'object' && m.reasoning !== null)
+        ? m.reasoning as { efforts?: unknown; defaultEffort?: unknown }
+        : undefined
+      const efforts = Array.isArray(reasoning?.efforts)
+        ? reasoning.efforts
+          .map((e) => (typeof e === 'object' && e !== null && typeof (e as { id?: unknown }).id === 'string')
+            ? (e as { id: string }).id
+            : undefined)
+          .filter((id): id is string => id !== undefined)
+        : []
+      out.push({
+        provider: g.id,
+        ...typeof g.name === 'string' ? { providerName: g.name } : {},
+        id: m.id,
+        ...typeof m.name === 'string' ? { name: m.name } : {},
+        ...efforts.length > 0 ? { efforts } : {},
+        ...typeof reasoning?.defaultEffort === 'string' ? { defaultEffort: reasoning.defaultEffort } : {},
+        ...current?.provider === g.id && current.model === m.id ? { current: true } : {},
+      })
+    }
+  }
+  return out
 }

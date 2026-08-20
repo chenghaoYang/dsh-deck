@@ -3,13 +3,13 @@ import { describe, it } from 'node:test'
 
 import type { TranscriptItem, TranscriptState, ToolCallEntry } from '../src/model/fold.ts'
 import type { PendingApproval, SessionState } from '../src/model/store.ts'
-import type { HostDescription } from '../src/protocol/contract.ts'
+import type { HostDescription, QueuedInboxItem, TokenUsage } from '../src/protocol/contract.ts'
 import { computeLayout, type Rect } from '../src/ui/layout.ts'
 import { lineText, type RenderTarget } from '../src/ui/render.ts'
 import { renderComposer } from '../src/ui/composer.ts'
 import { renderHelp } from '../src/ui/help.ts'
 import { renderSidebar } from '../src/ui/sidebar.ts'
-import { renderFooter, renderHeader } from '../src/ui/statusbar.ts'
+import { renderFooter, renderHeader, type SessionTelemetry } from '../src/ui/statusbar.ts'
 import type { Glyphs, Theme } from '../src/ui/theme.ts'
 import { layoutTranscript, renderTranscript } from '../src/ui/transcript.ts'
 import { stringWidth } from '../src/term/width.ts'
@@ -141,6 +141,7 @@ function session(id: string, extra: {
     hasMoreHistory: false,
     queue: [],
     unread: extra.unread ?? 0,
+    telemetry: {},
   }
   if (extra.title !== undefined) row.title = extra.title
   if (extra.cwd !== undefined) row.cwd = extra.cwd
@@ -168,6 +169,81 @@ function toolCall(status: ToolCallEntry['status'], extra: Partial<ToolCallEntry>
   if (extra.startedAt !== undefined) call.startedAt = extra.startedAt
   if (extra.endedAt !== undefined) call.endedAt = extra.endedAt
   return call
+}
+
+/** Inline fixture matching fold.ts image items. */
+function imageItem(extra: { mediaType?: string; alt?: string } = {}): TranscriptItem {
+  const item: Extract<TranscriptItem, { kind: 'image' }> = {
+    kind: 'image',
+    seq: 8,
+    turn: 1,
+    step: 3,
+    alt: extra.alt ?? 'screenshot',
+  }
+  if (extra.mediaType !== undefined) item.mediaType = extra.mediaType
+  return item
+}
+
+/** Inline fixture matching fold.ts turn-end elapsed/usage fields. */
+function turnEndItem(extra: {
+  reason?: string
+  elapsedMs?: number
+  usage?: TokenUsage
+} = {}): TranscriptItem {
+  const item: Extract<TranscriptItem, { kind: 'turn-end' }> = {
+    kind: 'turn-end',
+    seq: 9,
+    turn: 1,
+    reason: extra.reason ?? 'completed',
+  }
+  if (extra.elapsedMs !== undefined) item.elapsedMs = extra.elapsedMs
+  if (extra.usage !== undefined) item.usage = extra.usage
+  return item
+}
+
+function queuedItem(content: QueuedInboxItem['message']['content'], id = 'q1'): QueuedInboxItem {
+  return { id, placement: 'queued', message: { role: 'user', content } }
+}
+
+function telemetry(pctParts: {
+  contextWindow?: number
+  systemTokens?: number
+  toolsTokens?: number
+  messageTokens?: number
+  decodeMs?: number
+  decodeTokens?: number
+  ttftMs?: number
+}): SessionTelemetry {
+  const row: SessionTelemetry = {}
+  if (pctParts.contextWindow !== undefined) row.contextWindow = pctParts.contextWindow
+  if (
+    pctParts.systemTokens !== undefined ||
+    pctParts.toolsTokens !== undefined ||
+    pctParts.messageTokens !== undefined
+  ) {
+    row.breakdown = {
+      systemTokens: pctParts.systemTokens ?? 0,
+      toolsTokens: pctParts.toolsTokens ?? 0,
+      messageTokens: pctParts.messageTokens ?? 0,
+    }
+  }
+  if (
+    pctParts.decodeMs !== undefined ||
+    pctParts.decodeTokens !== undefined ||
+    pctParts.ttftMs !== undefined
+  ) {
+    row.stats = {
+      turns: 1,
+      steps: 1,
+      llmMs: 1,
+      toolMs: 1,
+      ttftMs: pctParts.ttftMs ?? 0,
+      ttftSteps: 1,
+      decodeMs: pctParts.decodeMs ?? 0,
+      decodeTokens: pctParts.decodeTokens ?? 0,
+    }
+  }
+  return row
 }
 
 function sampleItems(): TranscriptItem[] {
@@ -199,6 +275,7 @@ function sampleItems(): TranscriptItem[] {
     { kind: 'error', seq: 5, text: 'host closed the mux socket' },
     { kind: 'notice', seq: 6, text: 'replaying history' },
     { kind: 'turn-end', seq: 7, turn: 1, reason: 'stop' },
+    imageItem({ mediaType: 'image/png' }),
   ]
 }
 
@@ -228,6 +305,11 @@ function paintAll(rectFor: (kind: string, layout: ReturnType<typeof computeLayou
     glyphs,
     spinnerFrame: 3,
     expandTools: false,
+    queue: [
+      queuedItem('queued latin that should stay on one dim tail line'),
+      queuedItem('中文队列'.repeat(20), 'q2'),
+    ],
+    retrying: { count: 2, reason: 'RATE_LIMIT' },
   })
 
   const header = new BoundsTarget(rectFor('header', layout))
@@ -238,6 +320,15 @@ function paintAll(rectFor: (kind: string, layout: ReturnType<typeof computeLayou
     sessionTitle: '中文会话 title that is deliberately long',
     theme,
     glyphs,
+    telemetry: telemetry({
+      contextWindow: 16_000,
+      systemTokens: 1592,
+      toolsTokens: 6409,
+      messageTokens: 1945,
+      decodeMs: 400,
+      decodeTokens: 18,
+      ttftMs: 1000,
+    }),
   })
 
   const footer = new BoundsTarget(rectFor('footer', layout))
@@ -394,6 +485,115 @@ describe('layoutTranscript', () => {
     assert.match(plain, /\[r\] reject/)
     assert.match(plain, /bash/)
   })
+
+  it('renders an image item as a compact card', () => {
+    const lines = layoutTranscript([imageItem({ mediaType: 'image/png', alt: 'plot' })], {
+      width: 40,
+      theme,
+      glyphs,
+      spinnerFrame: 0,
+      expandTools: false,
+    })
+    assert.equal(lines.length, 1)
+    const first = lines[0]
+    assert.ok(first)
+    const plain = lineText(first)
+    assert.match(plain, /▣/)
+    assert.match(plain, /image \(png\)/)
+    assert.match(plain, /ctrl\+o to view/)
+    assert.ok(stringWidth(plain) <= 40)
+  })
+
+  it('turn-end includes elapsed and humanized usage when present', () => {
+    const rich = layoutTranscript(
+      [turnEndItem({ reason: 'completed', elapsedMs: 12_400, usage: { inputTokens: 1234, outputTokens: 458 } })],
+      { width: 48, theme, glyphs, spinnerFrame: 0, expandTools: false },
+    )
+    const richPlain = rich.map(lineText).join('\n')
+    assert.match(richPlain, /completed/)
+    assert.match(richPlain, /12\.4s/)
+    assert.match(richPlain, /↑1\.2k/)
+    assert.match(richPlain, /↓458/)
+    assert.match(richPlain, /tok/)
+    for (const line of rich) assert.ok(stringWidth(lineText(line)) <= 48)
+
+    const plain = layoutTranscript([{ kind: 'turn-end', seq: 1, turn: 1, reason: 'stop' }], {
+      width: 40,
+      theme,
+      glyphs,
+      spinnerFrame: 0,
+      expandTools: false,
+    })
+    const plainText = plain.map(lineText).join('\n')
+    assert.match(plainText, /stop/)
+    assert.doesNotMatch(plainText, /tok/)
+    assert.doesNotMatch(plainText, /↑/)
+  })
+
+  it('queued tail lines render dim and truncate CJK without splitting', () => {
+    const width = 22
+    const cjk = '中文测试汉字宽度还要更长'
+    const lines = layoutTranscript([{ kind: 'user', seq: 1, time: 0, text: 'hi' }], {
+      width,
+      theme,
+      glyphs,
+      spinnerFrame: 0,
+      expandTools: false,
+      queue: [
+        queuedItem('first line\nignored'),
+        queuedItem([{ type: 'text', text: cjk }]),
+      ],
+    })
+    const queued = lines.filter((line) => lineText(line).includes('(queued)'))
+    assert.equal(queued.length, 2)
+    assert.match(lineText(queued[0]!), /first line/)
+    assert.doesNotMatch(lineText(queued[0]!), /ignored/)
+    for (const line of queued) {
+      const plain = lineText(line)
+      assert.ok(stringWidth(plain) <= width, `"${plain}" is ${stringWidth(plain)} cols`)
+      for (const span of line.spans) assert.equal(span.style, theme.dim)
+    }
+    const cjkLine = lineText(queued[1]!)
+    const segmenter = new Intl.Segmenter('en', { granularity: 'grapheme' })
+    const recovered: string[] = []
+    for (const { segment } of segmenter.segment(cjkLine)) {
+      if (/[\u4e00-\u9fff]/.test(segment)) {
+        assert.equal(stringWidth(segment), 2)
+        recovered.push(segment)
+      }
+    }
+    assert.ok(recovered.length > 0)
+    assert.equal(cjk.slice(0, recovered.length), recovered.join(''))
+    assert.ok(cjkLine.includes('…') || recovered.join('').length < cjk.length)
+  })
+
+  it('retrying line is last and warn-colored', () => {
+    const lines = layoutTranscript(
+      [
+        { kind: 'user', seq: 1, time: 0, text: 'go' },
+        { kind: 'turn-end', seq: 2, turn: 1, reason: 'stop' },
+      ],
+      {
+        width: 40,
+        theme,
+        glyphs,
+        spinnerFrame: 0,
+        expandTools: false,
+        queue: [queuedItem('still waiting')],
+        retrying: { count: 2, reason: 'RATE_LIMIT' },
+      },
+    )
+    const last = lines[lines.length - 1]
+    assert.ok(last)
+    const plain = lineText(last)
+    assert.match(plain, /retrying \(2\)/)
+    assert.match(plain, /RATE_LIMIT/)
+    assert.match(plain, /⠋/)
+    assert.ok(last.spans.every((span) => span.style === theme.warn))
+    const queuedAt = lines.findIndex((line) => lineText(line).includes('(queued)'))
+    assert.ok(queuedAt >= 0)
+    assert.ok(queuedAt < lines.length - 1)
+  })
 })
 
 describe('sidebar', () => {
@@ -435,5 +635,153 @@ describe('composer', () => {
     assert.equal(pos.row, rect.row)
     assert.equal(pos.col, rect.col + stringWidth('中文'))
     assert.equal(stringWidth('中文'), 4)
+  })
+
+  it('shows queue/steer in accent when busy and send when idle', () => {
+    const rect: Rect = { row: 8, col: 1, width: 40, height: 1 }
+    const busy = new BoundsTarget(rect)
+    renderComposer(busy, {
+      rect,
+      draft: 'hello',
+      cursor: 0,
+      mode: 'queue',
+      busy: true,
+      theme,
+      glyphs,
+    })
+    assert.match(busy.plain(), /⏎ queue · ⌥⏎ steer/)
+    assert.ok(busy.puts.some((p) => p.text.includes('queue') && p.style === theme.accent))
+
+    const idle = new BoundsTarget(rect)
+    const pos = renderComposer(idle, {
+      rect,
+      draft: 'hello',
+      cursor: 2,
+      mode: 'steer',
+      busy: false,
+      theme,
+      glyphs,
+    })
+    assert.match(idle.plain(), /⏎ send/)
+    assert.doesNotMatch(idle.plain(), /queue/)
+    assert.ok(idle.puts.some((p) => p.text.includes('send') && p.style === theme.dim))
+    assert.equal(pos.row, rect.row)
+    assert.equal(pos.col, rect.col + stringWidth('he'))
+  })
+})
+
+describe('header telemetry', () => {
+  const sampleTel = telemetry({
+    contextWindow: 1000,
+    systemTokens: 80,
+    toolsTokens: 20,
+    messageTokens: 20,
+    decodeMs: 1000,
+    decodeTokens: 45,
+    ttftMs: 1000,
+  })
+
+  function paint(rect: Rect, extra: { title?: string; host?: HostDescription; telemetry?: SessionTelemetry } = {}): BoundsTarget {
+    const target = new BoundsTarget(rect)
+    renderHeader(target, {
+      rect,
+      host: extra.host,
+      connection: 'ready',
+      sessionTitle: extra.title,
+      theme,
+      glyphs,
+      ...(extra.telemetry !== undefined ? { telemetry: extra.telemetry } : { telemetry: sampleTel }),
+    })
+    return target
+  }
+
+  it('renders ctx, tok/s, and ttft before the provider·model segment', () => {
+    const rect: Rect = { row: 1, col: 1, width: 80, height: 1 }
+    const target = paint(rect, { title: 'ok', host })
+    const plain = target.plain()
+    assert.match(plain, /ctx 12%/)
+    assert.match(plain, /45 tok\/s/)
+    assert.match(plain, /ttft 1\.0s/)
+    assert.match(plain, /deepseek · deepseek-chat/)
+    const telAt = plain.indexOf('ctx 12%')
+    const hostAt = plain.indexOf('deepseek ·')
+    assert.ok(telAt >= 0 && hostAt > telAt)
+  })
+
+  it('uses warn at 75% context and error at 90%', () => {
+    const rect: Rect = { row: 1, col: 1, width: 80, height: 1 }
+    const warn = paint(rect, {
+      title: 'ok',
+      host,
+      telemetry: telemetry({
+        contextWindow: 200,
+        systemTokens: 150,
+        toolsTokens: 0,
+        messageTokens: 0,
+        decodeMs: 1000,
+        decodeTokens: 10,
+        ttftMs: 500,
+      }),
+    })
+    const warnCtx = warn.puts.find((p) => p.text.includes('ctx 75%'))
+    assert.ok(warnCtx, `expected ctx 75% in ${JSON.stringify(warn.puts)}`)
+    assert.equal(warnCtx.style, theme.warn)
+
+    const err = paint(rect, {
+      title: 'ok',
+      host,
+      telemetry: telemetry({
+        contextWindow: 200,
+        systemTokens: 180,
+        toolsTokens: 0,
+        messageTokens: 0,
+        decodeMs: 1000,
+        decodeTokens: 10,
+        ttftMs: 500,
+      }),
+    })
+    const errCtx = err.puts.find((p) => p.text.includes('ctx 90%'))
+    assert.ok(errCtx, `expected ctx 90% in ${JSON.stringify(err.puts)}`)
+    assert.equal(errCtx.style, theme.error)
+
+    const ok = paint(rect, {
+      title: 'ok',
+      host,
+      telemetry: telemetry({
+        contextWindow: 200,
+        systemTokens: 148,
+        toolsTokens: 0,
+        messageTokens: 0,
+        decodeMs: 1000,
+        decodeTokens: 10,
+        ttftMs: 500,
+      }),
+    })
+    const okCtx = ok.puts.find((p) => p.text.includes('ctx 74%'))
+    assert.ok(okCtx, `expected ctx 74% in ${JSON.stringify(ok.puts)}`)
+    assert.equal(okCtx.style, theme.dim)
+  })
+
+  it('degrades right-to-left at 40 columns without overlapping the title', () => {
+    const rect: Rect = { row: 1, col: 1, width: 40, height: 1 }
+    const tight = paint(rect, { title: 'ok' })
+    const tightPlain = tight.plain()
+    assert.match(tightPlain, /deck/)
+    assert.match(tightPlain, /ok/)
+    assert.match(tightPlain, /ctx 12%/)
+    assert.doesNotMatch(tightPlain, /ttft/)
+    assert.equal(stringWidth(tightPlain.replace(/\s+$/, '')) <= 40, true)
+
+    const crowded = paint(rect, {
+      title: '中文会话 title that is deliberately long',
+      host,
+    })
+    const crowdedPlain = crowded.plain()
+    assert.match(crowdedPlain, /deck/)
+    assert.match(crowdedPlain, /中文/)
+    assert.doesNotMatch(crowdedPlain, /ttft/)
+    const deckAt = crowdedPlain.indexOf('deck')
+    const titleAt = crowdedPlain.indexOf('中')
+    assert.ok(deckAt >= 0 && titleAt > deckAt)
   })
 })
