@@ -110,6 +110,8 @@ describe('screen', () => {
     const screen = new Screen(out.stream, caps())
     openScreens.push(screen)
     screen.open()
+    assert.ok(out.output.includes('\u001b[?1002h'))
+    assert.ok(out.output.includes('\u001b[?1006h'))
     out.clear()
     screen.close()
     const first = out.output
@@ -117,6 +119,8 @@ describe('screen', () => {
     assert.ok(first.includes('\u001b[?1049l'))
     assert.ok(first.includes('\u001b[0m'))
     assert.ok(first.includes('\u001b]9;4;0;0\u001b\\'))
+    assert.ok(first.includes('\u001b[?1002l'))
+    assert.ok(first.includes('\u001b[?1006l'))
     for (const part of [
       '\u001b[?25h',
       '\u001b[?1049l',
@@ -127,6 +131,36 @@ describe('screen', () => {
     }
     screen.close()
     assert.equal(out.output, first)
+  })
+
+  it('setMouse writes DECSET/DECRST 1002+1006; close always disables', () => {
+    const out = fakeOut()
+    const screen = new Screen(out.stream, caps())
+    openScreens.push(screen)
+    const dump = (): string => out.output
+    screen.setMouse(true)
+    assert.equal(dump(), '')
+    screen.open()
+    out.clear()
+    screen.setMouse(true)
+    assert.equal(dump(), '')
+    screen.setMouse(false)
+    assert.equal(dump(), '\u001b[?1002l\u001b[?1006l')
+    out.clear()
+    screen.setMouse(false)
+    assert.equal(dump(), '')
+    screen.setMouse(true)
+    assert.equal(dump(), '\u001b[?1002h\u001b[?1006h')
+    out.clear()
+    screen.close()
+    const restored = dump()
+    assert.ok(restored.includes('\u001b[?1002l'))
+    assert.ok(restored.includes('\u001b[?1006l'))
+    screen.close()
+    assert.equal(dump(), restored)
+    out.clear()
+    screen.setMouse(true)
+    assert.equal(dump(), '')
   })
 
   it('hooks exit, SIGINT, SIGTERM, and uncaughtException, and unhooks on close', () => {

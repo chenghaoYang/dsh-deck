@@ -4,8 +4,8 @@
  * match `cursorTo` and Module D's layout rects.
  *
  * close() is idempotent and is hooked to exit / SIGINT / SIGTERM /
- * uncaughtException so a crash cannot leave an invisible cursor or a stuck
- * OSC 9;4 bar.
+ * uncaughtException so a crash cannot leave an invisible cursor, a stuck
+ * OSC 9;4 bar, or a terminal still reporting mouse (`CSI ?1002l` `CSI ?1006l`).
  */
 
 import {
@@ -30,6 +30,10 @@ export interface Cell {
 
 const EMPTY: Cell = { char: ' ', style: '', width: 1 }
 const CONT: Cell = { char: '', style: '', width: 1 }
+
+/** Button-event tracking + SGR encoding. Ghostty 1.3: VERIFIED. */
+const MOUSE_ON = `${CSI}?1002h${CSI}?1006h`
+const MOUSE_OFF = `${CSI}?1002l${CSI}?1006l`
 
 function isCont(cell: Cell): boolean {
   return cell === CONT
@@ -60,6 +64,7 @@ export class Screen {
   #next: Cell[][] | undefined
   #opened = false
   #closed = false
+  #mouseEnabled = false
   #cursorRow = -1
   #cursorCol = -1
   #style = ''
@@ -67,8 +72,10 @@ export class Screen {
   constructor(out: NodeJS.WriteStream, caps: TerminalCapabilities) {
     this.#out = out
     this.#caps = caps
-    this.#cols = Math.max(1, out.columns ?? 80)
-    this.#rows = Math.max(1, out.rows ?? 24)
+    // A pty can report a degenerate 1x1 (macOS `script` with piped stdio does);
+    // fall back to COLUMNS/LINES, then sane defaults, so scripted runs render.
+    this.#cols = sizeOf(out.columns, process.env.COLUMNS, 80)
+    this.#rows = sizeOf(out.rows, process.env.LINES, 24)
     this.#prev = makeGrid(this.#rows, this.#cols)
   }
 
@@ -84,7 +91,10 @@ export class Screen {
   open(): void {
     if (this.#opened || this.#closed) return
     this.#opened = true
-    this.#write(altScreen(true) + hideCursor() + `${CSI}?2004h` + eraseDisplay() + cursorTo(1, 1))
+    this.#write(
+      altScreen(true) + hideCursor() + `${CSI}?2004h` + MOUSE_ON + eraseDisplay() + cursorTo(1, 1),
+    )
+    this.#mouseEnabled = true
     if (this.#caps.unicodeCore) this.#write('\u001b[?2027h')
     this.#out.on?.('resize', this.#onStreamResize)
     process.on('exit', this.#onExit)
@@ -112,7 +122,21 @@ export class Screen {
     process.removeListener('SIGTERM', this.#onSigterm)
     process.removeListener('uncaughtException', this.#onUncaught)
     process.removeListener('uncaughtExceptionMonitor', this.#onUncaughtMonitor)
-    this.#write(restoreTerminal())
+    // Always DECRST mouse here (even if already off). ansi.ts restoreTerminal
+    // does not own 1002/1006; a crash must not leave the tty reporting mouse.
+    this.#mouseEnabled = false
+    this.#write(MOUSE_OFF + restoreTerminal())
+  }
+
+  /**
+   * Runtime toggle so the app can restore native text selection. No-op after
+   * close() — re-enabling post-restore would leak mouse reports into the shell.
+   */
+  setMouse(enabled: boolean): void {
+    if (!this.#opened || this.#closed) return
+    if (this.#mouseEnabled === enabled) return
+    this.#mouseEnabled = enabled
+    this.#write(enabled ? MOUSE_ON : MOUSE_OFF)
   }
 
   onResize(listener: (columns: number, rows: number) => void): () => void {
@@ -247,8 +271,11 @@ export class Screen {
   }
 
   #syncSize(): void {
-    const cols = Math.max(1, this.#out.columns ?? this.#cols)
-    const rows = Math.max(1, this.#out.rows ?? this.#rows)
+    // Keep the last trustworthy size when the stream reports a degenerate one.
+    const reportedCols = this.#out.columns
+    const reportedRows = this.#out.rows
+    const cols = typeof reportedCols === 'number' && reportedCols > 1 ? reportedCols : this.#cols
+    const rows = typeof reportedRows === 'number' && reportedRows > 1 ? reportedRows : this.#rows
     if (cols === this.#cols && rows === this.#rows) return
     this.#cols = cols
     this.#rows = rows
@@ -316,4 +343,12 @@ function firstPaintGrapheme(char: string | undefined): string {
     if (graphemeWidth(g) > 0) return g
   }
   return ' '
+}
+
+/** Stream size when it is trustworthy, else the env override, else the default. */
+function sizeOf(reported: number | undefined, env: string | undefined, fallback: number): number {
+  if (typeof reported === 'number' && reported > 1) return reported
+  const parsed = Number(env)
+  if (Number.isInteger(parsed) && parsed > 1) return parsed
+  return fallback
 }

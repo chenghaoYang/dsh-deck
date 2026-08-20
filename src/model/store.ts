@@ -83,9 +83,18 @@ export class DeckStore {
   private readonly pending = new Map<string, StoreChange>()
   private scheduled = false
 
+  /**
+   * Durable archive registry. Host snapshots replace it in full
+   * (`workspace.list` baseline and `host/archived-sessions-changed`).
+   * Survives `resetLiveState`. Archived ids stay in `session.list` on the
+   * host; this client hides them from `sessions` unless currently focused.
+   */
+  private archivedSessionIds = new Set<SessionId>()
+
   get sessions(): readonly SessionState[] {
     return [...this.byId.values()]
       .filter((session) => !session.blank)
+      .filter((session) => !this.archivedSessionIds.has(session.id) || this.focusedId === session.id)
       .sort((a, b) => {
         if (a.running !== b.running) return a.running ? -1 : 1
         if (a.updatedAt !== b.updatedAt) return b.updatedAt - a.updatedAt
@@ -173,9 +182,21 @@ export class DeckStore {
         this.emit({ kind: 'status', sessionId: frame.sessionId })
         return
       }
+      case 'host/archived-sessions-changed':
+        // Full snapshot, not a delta — same replace-in-full rule as the baseline.
+        this.replaceArchived(frame.archivedSessionIds)
+        return
       default:
         return
     }
+  }
+
+  /**
+   * Reconnect baseline from `workspace.list` → `{ archivedSessionIds }`.
+   * Replaces the registry in full, same as the host snapshot frame.
+   */
+  applyArchivedBaseline(ids: readonly SessionId[]): void {
+    this.replaceArchived(ids)
   }
 
   applySessionList(items: readonly SessionSummary[]): void {
@@ -424,6 +445,13 @@ export class DeckStore {
     return created
   }
 
+  private replaceArchived(ids: readonly SessionId[]): void {
+    const next = new Set<SessionId>(ids)
+    if (sameIdSet(this.archivedSessionIds, next)) return
+    this.archivedSessionIds = next
+    this.emit({ kind: 'sessions' })
+  }
+
   private emit(change: StoreChange): void {
     const key = change.kind === 'sessions' ? 'sessions' : `${change.kind}:${change.sessionId}`
     this.pending.set(key, change)
@@ -615,4 +643,12 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 
 function asFiniteNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+function sameIdSet(a: ReadonlySet<SessionId>, b: ReadonlySet<SessionId>): boolean {
+  if (a.size !== b.size) return false
+  for (const id of a) {
+    if (!b.has(id)) return false
+  }
+  return true
 }

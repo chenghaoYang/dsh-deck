@@ -312,6 +312,9 @@ export interface RpcMethods {
     value: { attachment: unknown; data: string }
   }
   'session.updateQueue': { payload: { sessionId: SessionId; itemId: MessageId; action: unknown }; value: { accepted: true } }
+  /** Archived sessions stay in session.list; clients hide them via this registry. Verified live. */
+  'workspace.list': { payload: {}; value: { items: unknown[]; archivedSessionIds: SessionId[] } }
+  'workspace.archiveSession': { payload: { sessionId: SessionId }; value: { archivedSessionIds: SessionId[] } }
 }
 
 export type RpcMethodName = keyof RpcMethods

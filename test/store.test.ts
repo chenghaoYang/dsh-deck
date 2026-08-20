@@ -502,3 +502,106 @@ describe('session telemetry', () => {
     stop()
   })
 })
+
+describe('archived sessions', () => {
+  it('applyArchivedBaseline hides archived ids from the visible list', async () => {
+    const store = new DeckStore()
+    store.applySessionList([
+      summary('keep', { updatedAt: 30 }),
+      summary('junk', { updatedAt: 20 }),
+      summary('also', { updatedAt: 10 }),
+    ])
+    await flush()
+    const { events, stop } = collect(store)
+
+    store.applyArchivedBaseline(['junk'])
+    await flush()
+
+    assert.deepEqual(store.sessions.map((session) => session.id), ['keep', 'also'])
+    assert.ok(store.get('junk'), 'archived sessions stay addressable')
+    assert.ok(events.some((event) => event.kind === 'sessions'))
+    stop()
+  })
+
+  it('host/archived-sessions-changed replaces the set (hide and unhide)', async () => {
+    const store = new DeckStore()
+    store.applySessionList([
+      summary('a', { updatedAt: 3 }),
+      summary('b', { updatedAt: 2 }),
+      summary('c', { updatedAt: 1 }),
+    ])
+
+    store.applyHost({ type: 'host/archived-sessions-changed', archivedSessionIds: ['b'] }, 'r')
+    assert.deepEqual(store.sessions.map((session) => session.id), ['a', 'c'])
+
+    store.applyHost({ type: 'host/archived-sessions-changed', archivedSessionIds: ['a', 'c'] }, 'r')
+    assert.deepEqual(store.sessions.map((session) => session.id), ['b'])
+
+    store.applyHost({ type: 'host/archived-sessions-changed', archivedSessionIds: [] }, 'r')
+    assert.deepEqual(store.sessions.map((session) => session.id), ['a', 'b', 'c'])
+  })
+
+  it('focused archived session stays visible until focus moves away', async () => {
+    const store = new DeckStore()
+    store.applySessionList([
+      summary('alpha', { updatedAt: 2 }),
+      summary('beta', { updatedAt: 1 }),
+    ])
+    store.focus('alpha')
+    store.applyArchivedBaseline(['alpha'])
+
+    assert.equal(store.sessions.some((session) => session.id === 'alpha'), true)
+    assert.equal(store.focusedId, 'alpha')
+
+    store.focus('beta')
+    assert.equal(store.sessions.some((session) => session.id === 'alpha'), false)
+    assert.equal(store.sessions.some((session) => session.id === 'beta'), true)
+    assert.ok(store.get('alpha'))
+  })
+
+  it('archived sessions stay addressable and keep receiving events', async () => {
+    const store = new DeckStore()
+    store.applySessionList([summary('live'), summary('hid')])
+    store.focus('live')
+    store.applyArchivedBaseline(['hid'])
+
+    store.applyMux({
+      type: 'session/event',
+      sessionId: 'hid',
+      event: ev(0, 'user/message', user('still here'), { surfaceOp: 'append' }),
+    }, 'r')
+    await flush()
+
+    const hidden = store.get('hid')
+    assert.ok(hidden)
+    assert.equal(hidden.transcript.items[0]?.kind, 'user')
+    assert.equal(hidden.unread, 1)
+    assert.equal(store.sessions.some((session) => session.id === 'hid'), false)
+  })
+
+  it('archive set survives resetLiveState', async () => {
+    const store = new DeckStore()
+    store.applySessionList([
+      summary('keep', { cwd: '/work', updatedAt: 2 }),
+      summary('hid', { cwd: '/tmp', updatedAt: 1 }),
+    ])
+    store.applyArchivedBaseline(['hid'])
+    store.applyMux({
+      type: 'session/event',
+      sessionId: 'hid',
+      event: ev(0, 'user/message', user('live'), { surfaceOp: 'append' }),
+    }, 'r')
+    await flush()
+    assert.ok((store.get('hid')?.transcript.items.length ?? 0) > 0)
+
+    store.resetLiveState()
+    await flush()
+
+    assert.equal(store.sessions.some((session) => session.id === 'hid'), false)
+    assert.equal(store.sessions.some((session) => session.id === 'keep'), true)
+    const hidden = store.get('hid')
+    assert.equal(hidden?.cwd, '/tmp')
+    assert.equal(hidden?.transcript.items.length, 0)
+    assert.equal(hidden?.historyLoaded, false)
+  })
+})

@@ -53,6 +53,24 @@ export function renderSidebar(target: RenderTarget, props: SidebarProps): void {
   }
 }
 
+/**
+ * Map a clicked terminal row back to the session it shows, using the exact
+ * windowing renderSidebar painted with. Undefined outside the list.
+ */
+export function sidebarHitTest(
+  sessions: readonly SessionState[],
+  focusedId: string | undefined,
+  rect: Rect,
+  row: number,
+): SessionState | undefined {
+  if (row < rect.row || row >= rect.row + rect.height) return undefined
+  const focusedAt = focusedId === undefined ? 0 : sessions.findIndex((s) => s.id === focusedId)
+  const window = visibleWindow(sessions.length, rect.height, focusedAt < 0 ? 0 : focusedAt)
+  const offset = row - rect.row
+  if (offset >= window.length) return undefined
+  return sessions[window.start + offset]
+}
+
 function visibleWindow(
   count: number,
   height: number,

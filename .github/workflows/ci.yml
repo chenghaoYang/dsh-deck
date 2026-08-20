@@ -1,0 +1,29 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node: ['22', '24']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      # The e2e boots a real `dsh web` host against the bundled fake model
+      # server inside a throwaway DSH_HOME, so it needs the harness CLI but no
+      # API key. rc versions ride the `next` tag.
+      - run: npm i -g @deepseek-ai/dsh@latest
+      - run: npm run e2e

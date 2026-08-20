@@ -39,8 +39,29 @@ import {
   type PickerOverlayState,
   type QuestionOverlayState,
 } from './overlay.ts'
+import {
+  createSwitcher,
+  reduceSwitcher,
+  renderSwitcher,
+  updateSwitcherEntries,
+  type SwitcherEntry,
+  type SwitcherState,
+} from './switcher.ts'
+import {
+  beginDrag,
+  endDrag,
+  extractSelection,
+  isEmptySelection,
+  screenToPoint,
+  selectedRange,
+  updateDrag,
+  type DragState,
+  type Selection,
+} from './selection.ts'
+import { sidebarHitTest } from './sidebar.ts'
 import type { AskUserQuestionAnswer, RpcId } from '../protocol/contract.ts'
-import { cursorTo } from '../term/ansi.ts'
+import { cursorTo, sgr } from '../term/ansi.ts'
+import { appendFileSync } from 'node:fs'
 
 /** Frame budget. 24fps is plenty for text and leaves the CPU alone while idle. */
 const FRAME_INTERVAL_MS = 42
@@ -49,6 +70,7 @@ const SPINNER_INTERVAL_MS = 90
 
 const KEY_HINTS = [
   { key: 'tab', label: 'switch' },
+  { key: '^k', label: 'sessions' },
   { key: '^n', label: 'new' },
   { key: '^c', label: 'cancel' },
   { key: '^g', label: 'help' },
@@ -68,13 +90,21 @@ type Overlay =
   | { kind: 'question'; sessionId: SessionId; rpcId: RpcId; state: QuestionOverlayState }
   | { kind: 'picker'; sessionId: SessionId; state: PickerOverlayState }
   | { kind: 'image'; alt: string; data: Uint8Array; transmitted: boolean; layout?: ImageOverlayLayout }
+  | { kind: 'switcher'; state: SwitcherState }
+
+function inRect(rect: { row: number; col: number; width: number; height: number }, row: number, col: number): boolean {
+  return row >= rect.row && row < rect.row + rect.height && col >= rect.col && col < rect.col + rect.width
+}
 
 const BINDINGS = [
   { keys: 'type anything', label: 'goes to the composer — letters are never commands' },
   { keys: 'enter', label: 'send (queues behind the running turn)' },
   { keys: 'alt+enter', label: 'send as steering, interrupting the turn' },
   { keys: 'tab', label: 'next session' },
+  { keys: 'ctrl+k', label: 'session switcher: type to filter, ^x archive, ^r rename' },
   { keys: 'alt+1 … alt+9', label: 'jump to a session' },
+  { keys: 'mouse', label: 'click a session to focus it; drag in the transcript to select and copy; wheel scrolls' },
+  { keys: 'ctrl+t', label: 'toggle mouse capture (off = native terminal selection)' },
   { keys: 'ctrl+n', label: 'new session in the current directory' },
   { keys: 'ctrl+p', label: 'pick the model and reasoning effort' },
   { keys: 'ctrl+o', label: 'view the latest image inline (Kitty graphics)' },
@@ -128,6 +158,12 @@ export class DeckApp {
   private expandTools = false
   private message: Message | undefined
   private overlay: Overlay | undefined
+  private lastLayout: Layout | undefined
+  private lastLines: readonly RenderedLine[] = []
+  private drag: DragState | undefined
+  private selection: Selection | undefined
+  private mouseEnabled = true
+  private readonly debugKeysPath = process.env.DECK_DEBUG_KEYS
   private messageTimer: NodeJS.Timeout | undefined
   private frameTimer: NodeJS.Timeout | undefined
   private spinnerTimer: NodeJS.Timeout | undefined
@@ -189,6 +225,10 @@ export class DeckApp {
 
   private async onReady(host: HostDescription): Promise<void> {
     this.host = host
+    // Archived sessions stay in session.list; the registry is the only way to
+    // hide them, and this is its reconnect baseline.
+    const workspace = await this.client.call('workspace.list', {})
+    if (workspace.ok) this.store.applyArchivedBaseline(workspace.value.archivedSessionIds)
     const result = await this.client.call('session.list', {})
     if (!result.ok) {
       this.notice(`session.list failed: ${result.error.message}`, 'error')
@@ -262,6 +302,20 @@ export class DeckApp {
    * draft. Awaiting first let several keys observe the same stale draft.
    */
   private onKey(key: Key): void {
+    // Interaction debugging: pty-driven runs cannot be watched, so this trace
+    // is how mouse/keyboard issues get diagnosed. Set DECK_DEBUG_KEYS=<file>.
+    if (this.debugKeysPath !== undefined) {
+      try {
+        appendFileSync(this.debugKeysPath, `${JSON.stringify(key)}\n`)
+      } catch {
+        // never let tracing break input
+      }
+    }
+    if (key.kind === 'mouse' || key.kind === 'wheel') {
+      this.onMouse(key)
+      return
+    }
+
     // A modal overlay owns the keyboard outright.
     if (this.overlay !== undefined) {
       this.onOverlayKey(this.overlay, key)
@@ -334,13 +388,144 @@ export class DeckApp {
       case 'l': this.scrollOffset = 0; this.requestFrame(); return
       case 'p': void this.openPicker(); return
       case 'o': void this.openLatestImage(); return
+      case 'k': this.openSwitcher(); return
+      case 't': this.toggleMouse(); return
       default: return
     }
+  }
+
+  private openSwitcher(): void {
+    if (this.overlay !== undefined) return
+    this.overlay = { kind: 'switcher', state: createSwitcher(this.switcherEntries(), this.store.focusedId) }
+    this.requestFrame()
+  }
+
+  private switcherEntries(): SwitcherEntry[] {
+    return this.store.sessions.map((s) => ({
+      id: s.id,
+      title: this.titleOf(s),
+      ...s.cwd === undefined ? {} : { cwd: s.cwd },
+      running: s.running,
+      unread: s.unread,
+      blocked: s.pendingApproval !== undefined || s.pendingQuestion !== undefined,
+      updatedAt: s.updatedAt,
+    }))
+  }
+
+  private async archiveSession(id: SessionId): Promise<void> {
+    const result = await this.client.call('workspace.archiveSession', { sessionId: id })
+    if (!result.ok) {
+      this.notice(`archive failed: ${result.error.message}`, 'error')
+      return
+    }
+    this.store.applyArchivedBaseline(result.value.archivedSessionIds)
+    if (this.overlay?.kind === 'switcher') {
+      this.overlay = { kind: 'switcher', state: updateSwitcherEntries(this.overlay.state, this.switcherEntries()) }
+    }
+    this.notice('archived', 'info')
+    this.requestFrame()
+  }
+
+  private async renameSession(id: SessionId, title: string): Promise<void> {
+    const result = await this.client.call('session.rename', { sessionId: id, title })
+    if (!result.ok) this.notice(`rename failed: ${result.error.message}`, 'error')
+    else this.notice(`renamed: ${result.value.title}`, 'info')
+  }
+
+  // -- mouse -----------------------------------------------------------------
+
+  private onMouse(key: Extract<Key, { kind: 'mouse' } | { kind: 'wheel' }>): void {
+    // Modal overlays are keyboard-driven; swallowing stray clicks under them
+    // beats accidentally switching sessions behind a question card.
+    if (this.debugKeysPath !== undefined) {
+      try {
+        appendFileSync(this.debugKeysPath, `#mouse overlay=${this.overlay?.kind ?? 'none'} layout=${this.lastLayout === undefined ? 'undefined' : JSON.stringify({ t: this.lastLayout.transcript, s: this.lastLayout.sidebar })} screen=${this.screen.columns}x${this.screen.rows}\n`)
+      } catch { /* trace only */ }
+    }
+    if (this.overlay !== undefined) return
+    const layout = this.lastLayout
+    if (layout === undefined) return
+
+    if (key.kind === 'wheel') {
+      if (inRect(layout.transcript, key.row, key.col) || (layout.sidebar !== undefined && inRect(layout.sidebar, key.row, key.col))) {
+        this.scroll(key.direction === 'up' ? 3 : -3)
+      }
+      return
+    }
+
+    if (key.action === 'down' && key.button === 'left') {
+      if (layout.sidebar !== undefined && inRect(layout.sidebar, key.row, key.col)) {
+        const hit = sidebarHitTest(this.store.sessions, this.store.focusedId, layout.sidebar, key.row)
+        if (hit !== undefined) this.focus(hit.id)
+        return
+      }
+      if (inRect(layout.transcript, key.row, key.col)) {
+        const point = screenToPoint(layout.transcript, this.scrollOffset, this.lastLines.length, key.row, key.col)
+        if (this.debugKeysPath !== undefined) {
+          try {
+            appendFileSync(this.debugKeysPath, `#down rect=${JSON.stringify(layout.transcript)} lines=${this.lastLines.length} scroll=${this.scrollOffset} point=${JSON.stringify(point)}\n`)
+          } catch { /* trace only */ }
+        }
+        this.drag = beginDrag(point)
+        this.selection = undefined
+        this.requestFrame()
+      }
+      return
+    }
+
+    if (key.action === 'drag' && this.drag !== undefined) {
+      const point = screenToPoint(layout.transcript, this.scrollOffset, this.lastLines.length, key.row, key.col)
+      this.drag = updateDrag(this.drag, point)
+      this.selection = this.drag.selection
+      this.requestFrame()
+      return
+    }
+
+    if (key.action === 'up' && this.drag !== undefined) {
+      const { selection } = endDrag(this.drag)
+      this.drag = undefined
+      if (selection !== undefined && !isEmptySelection(selection)) {
+        this.selection = selection
+        const text = extractSelection(this.lastLines, selection)
+        if (text.length > 0) {
+          // Matches the user's terminal habit: releasing a selection copies it.
+          this.term.copy(text)
+          this.notice('selection copied', 'info')
+        }
+      } else {
+        this.selection = undefined
+      }
+      this.requestFrame()
+    }
+  }
+
+  private toggleMouse(): void {
+    this.mouseEnabled = !this.mouseEnabled
+    this.screen.setMouse(this.mouseEnabled)
+    this.selection = undefined
+    this.drag = undefined
+    this.notice(
+      this.mouseEnabled ? 'mouse on' : 'mouse off — the terminal\u2019s native text selection works now',
+      'info',
+    )
   }
 
   // -- overlays --------------------------------------------------------------
 
   private onOverlayKey(overlay: Overlay, key: Key): void {
+    if (overlay.kind === 'switcher') {
+      const result = reduceSwitcher(overlay.state, key)
+      switch (result.kind) {
+        case 'continue': this.overlay = { kind: 'switcher', state: result.state }; break
+        case 'focus': this.overlay = undefined; this.focus(result.id); break
+        case 'archive': this.overlay = { kind: 'switcher', state: result.state }; void this.archiveSession(result.id); break
+        case 'rename': this.overlay = undefined; void this.renameSession(result.id, result.title); break
+        case 'create': this.overlay = undefined; void this.createSession(); break
+        case 'cancelled': this.overlay = undefined; break
+      }
+      this.requestFrame()
+      return
+    }
     if (overlay.kind === 'question') {
       const result = reduceQuestionOverlay(overlay.state, key)
       if (result.kind === 'continue') {
@@ -512,6 +697,8 @@ export class DeckApp {
   private focus(id: SessionId): void {
     this.store.focus(id)
     this.scrollOffset = 0
+    this.selection = undefined
+    this.drag = undefined
     void this.loadHistory(id)
     this.maybeOpenQuestion()
     this.requestFrame()
@@ -725,6 +912,9 @@ export class DeckApp {
       theme: this.theme,
     })
     if (this.scrollOffset > maxScroll) this.scrollOffset = maxScroll
+    this.lastLayout = layout
+    this.lastLines = lines
+    this.paintSelection(layout, lines)
 
     this.screen.fill(layout.composer.row - 1, 1, columns, 1, this.glyphs.hline, this.theme.border)
     const caret = renderComposer(this.screen, {
@@ -756,7 +946,9 @@ export class DeckApp {
 
     let imageLayout: ImageOverlayLayout | undefined
     if (this.overlay !== undefined) {
-      if (this.overlay.kind === 'question') {
+      if (this.overlay.kind === 'switcher') {
+        renderSwitcher(this.screen, layout.transcript, this.overlay.state, this.theme, this.glyphs)
+      } else if (this.overlay.kind === 'question') {
         renderQuestionOverlay(this.screen, layout.transcript, this.overlay.state, this.theme, this.glyphs)
       } else if (this.overlay.kind === 'picker') {
         renderPickerOverlay(this.screen, layout.transcript, this.overlay.state, this.theme, this.glyphs)
@@ -780,6 +972,31 @@ export class DeckApp {
       })
     }
     void caret
+  }
+
+  /**
+   * Overpaint the selected slice of each visible line in reverse video.
+   * Reuses screenToPoint so highlighting and extraction share one mapping.
+   */
+  private paintSelection(layout: Layout, lines: readonly RenderedLine[]): void {
+    const sel = this.drag?.selection ?? this.selection
+    if (sel === undefined || isEmptySelection(sel) || this.overlay !== undefined) return
+    const rect = layout.transcript
+    for (let row = rect.row; row < rect.row + rect.height; row += 1) {
+      const point = screenToPoint(rect, this.scrollOffset, lines.length, row, rect.col)
+      if (point === undefined) continue
+      const line = lines[point.line]
+      if (line === undefined) continue
+      const width = stringWidth(line.spans.map((span) => span.text).join(''))
+      const range = selectedRange(sel, point.line, width)
+      if (range === undefined || range.to <= range.from) continue
+      const slice = extractSelection([...lines], {
+        anchor: { line: point.line, column: range.from },
+        head: { line: point.line, column: range.to },
+      })
+      if (slice.length === 0) continue
+      this.screen.put(row, rect.col + range.from, slice, sgr(7))
+    }
   }
 
   /** Only animate while something is actually running. */

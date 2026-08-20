@@ -2,6 +2,11 @@
  * Raw-mode key reader. Ctrl+C is a key event (`{kind:'ctrl',char:'c'}`), not a
  * process killer — raw mode clears ISIG. Partial UTF-8 and partial CSI are
  * buffered so CJK/IME never emits a replacement character mid-cluster.
+ *
+ * SGR mouse (`CSI < Pb ; Px ; Py M/m`) is decoded here. The same incomplete-CSI
+ * hold applies: a report split across stdin chunks must still become one event.
+ * Plain 1003 motion (button 3 + motion bit, no press) is discarded — we only
+ * enable 1002, but reports must not leak into the key stream.
  */
 
 import { StringDecoder } from 'node:string_decoder'
@@ -28,6 +33,25 @@ export type Key =
   | { kind: 'alt'; char: string }
   | { kind: 'paste'; text: string }
   | { kind: 'unknown'; raw: string }
+  | {
+      kind: 'mouse'
+      action: 'down' | 'up' | 'drag'
+      button: 'left' | 'middle' | 'right'
+      row: number
+      col: number
+      shift: boolean
+      alt: boolean
+      ctrl: boolean
+    }
+  | {
+      kind: 'wheel'
+      direction: 'up' | 'down'
+      row: number
+      col: number
+      shift: boolean
+      alt: boolean
+      ctrl: boolean
+    }
 
 const SEGMENTER = new Intl.Segmenter('en', { granularity: 'grapheme' })
 const ESC = '\u001b'
@@ -285,6 +309,20 @@ export class InputReader {
   }
 
   #dispatchCsi(params: string, final: string, raw: string): void {
+    // Private CSI `<…` is the SGR mouse family. Never reinterpret a failed
+    // mouse report as a nav key (`CSI A` vs `CSI <A`).
+    if (params.startsWith('<')) {
+      if (final === 'M' || final === 'm') {
+        const mouse = parseSgrMouse(params, final)
+        if (mouse === 'discard') return
+        if (mouse !== undefined) {
+          this.#emit(mouse)
+          return
+        }
+      }
+      this.#emit({ kind: 'unknown', raw })
+      return
+    }
     if (final === '~') {
       const n = (params.split(';')[0] ?? '') || '1'
       if (n === '200') {
@@ -306,6 +344,64 @@ export class InputReader {
     }
     this.#emit({ kind: 'unknown', raw })
   }
+}
+
+/**
+ * SGR Pb (xterm):
+ *   bits 0–1  button (0 left, 1 middle, 2 right; 3 = no-button / X10 release)
+ *   +4 shift, +8 alt/meta, +16 ctrl, +32 motion/drag
+ *   64 / 65 wheel up / down (wheel wins over M/m)
+ * Px/Py are 1-based col/row.
+ */
+function parseSgrMouse(params: string, final: string): Key | 'discard' | undefined {
+  const fields = params.slice(1).split(';')
+  const pbRaw = fields[0]
+  const pxRaw = fields[1]
+  const pyRaw = fields[2]
+  if (pbRaw === undefined || pxRaw === undefined || pyRaw === undefined) return undefined
+  const pb = parseDec(pbRaw)
+  const col = parseDec(pxRaw)
+  const row = parseDec(pyRaw)
+  if (pb === undefined || col === undefined || row === undefined) return undefined
+
+  const shift = (pb & 4) !== 0
+  const alt = (pb & 8) !== 0
+  const ctrl = (pb & 16) !== 0
+  const motion = (pb & 32) !== 0
+  const buttonBits = pb & 3
+
+  if ((pb & 64) !== 0) {
+    if (buttonBits === 0) {
+      return { kind: 'wheel', direction: 'up', row, col, shift, alt, ctrl }
+    }
+    if (buttonBits === 1) {
+      return { kind: 'wheel', direction: 'down', row, col, shift, alt, ctrl }
+    }
+    return undefined
+  }
+
+  // Buttons 8–11 (bit 7) are outside the Key contract.
+  if ((pb & 128) !== 0) return undefined
+
+  let button: 'left' | 'middle' | 'right'
+  if (buttonBits === 0) button = 'left'
+  else if (buttonBits === 1) button = 'middle'
+  else if (buttonBits === 2) button = 'right'
+  else {
+    // 3 + motion is 1003 hover; 3 without motion is X10-style release.
+    // Neither has a button we can name — drop them.
+    return 'discard'
+  }
+
+  const action: 'down' | 'up' | 'drag' = final === 'm' ? 'up' : motion ? 'drag' : 'down'
+  return { kind: 'mouse', action, button, row, col, shift, alt, ctrl }
+}
+
+function parseDec(text: string): number | undefined {
+  if (text.length === 0 || !/^[0-9]+$/.test(text)) return undefined
+  const n = Number(text)
+  if (!Number.isSafeInteger(n)) return undefined
+  return n
 }
 
 function firstGrapheme(text: string): string | undefined {
