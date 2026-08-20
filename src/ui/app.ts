@@ -62,6 +62,7 @@ import { sidebarHitTest } from './sidebar.ts'
 import type { AskUserQuestionAnswer, RpcId } from '../protocol/contract.ts'
 import { cursorTo, sgr } from '../term/ansi.ts'
 import { appendFileSync } from 'node:fs'
+import { spawn } from 'node:child_process'
 
 /** Frame budget. 24fps is plenty for text and leaves the CPU alone while idle. */
 const FRAME_INTERVAL_MS = 42
@@ -104,6 +105,7 @@ const BINDINGS = [
   { keys: 'ctrl+k', label: 'session switcher: type to filter, ^x archive, ^r rename' },
   { keys: 'alt+1 … alt+9', label: 'jump to a session' },
   { keys: 'mouse', label: 'click a session to focus it; drag in the transcript to select and copy; wheel scrolls' },
+  { keys: 'shift+drag', label: 'bypass deck — the terminal\u2019s own selection, always available' },
   { keys: 'ctrl+t', label: 'toggle mouse capture (off = native terminal selection)' },
   { keys: 'ctrl+n', label: 'new session in the current directory' },
   { keys: 'ctrl+p', label: 'pick the model and reasoning effort' },
@@ -489,7 +491,7 @@ export class DeckApp {
         const text = extractSelection(this.lastLines, selection)
         if (text.length > 0) {
           // Matches the user's terminal habit: releasing a selection copies it.
-          this.term.copy(text)
+          this.copyText(text)
           this.notice('selection copied', 'info')
         }
       } else {
@@ -497,6 +499,24 @@ export class DeckApp {
       }
       this.requestFrame()
     }
+  }
+
+  /**
+   * Two-route copy, the pattern Grok Build uses: the OS clipboard tool first
+   * (works even when the terminal refuses OSC 52 writes), OSC 52 as well
+   * (works across SSH where pbcopy does not exist).
+   */
+  private copyText(text: string): void {
+    if (process.platform === 'darwin') {
+      try {
+        const child = spawn('pbcopy', [], { stdio: ['pipe', 'ignore', 'ignore'] })
+        child.on('error', () => { /* OSC 52 still ran */ })
+        child.stdin.end(text)
+      } catch {
+        // OSC 52 still ran
+      }
+    }
+    this.term.copy(text)
   }
 
   private toggleMouse(): void {
@@ -562,7 +582,7 @@ export class DeckApp {
       return
     }
     if (key.kind === 'char' && key.char.toLowerCase() === 'y') {
-      this.term.copy(overlay.alt)
+      this.copyText(overlay.alt)
       this.notice('copied', 'info')
     }
   }
@@ -814,7 +834,7 @@ export class DeckApp {
     for (let i = items.length - 1; i >= 0; i -= 1) {
       const item = items[i]
       if (item !== undefined && item.kind === 'assistant') {
-        this.term.copy(item.text)
+        this.copyText(item.text)
         this.notice('copied to clipboard', 'info')
         return
       }

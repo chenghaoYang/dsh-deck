@@ -182,6 +182,15 @@ When an approval is waiting, the overlay takes the keyboard so answering is one
 keystroke: `a`/`y`/`enter` allows, `r`/`n`/`esc` rejects. The footer changes to
 show it.
 
+### Mouse
+
+The mouse works: click a sidebar session to focus it, scroll the transcript
+with the wheel, and drag to select text — the selection is copied on release,
+through the OS clipboard *and* OSC 52, so it survives both a strict terminal
+and an SSH hop. `shift+drag` always falls through to your terminal's native
+selection, and `ctrl+t` turns mouse capture off entirely. `ctrl+k` opens a
+fuzzy session switcher (type to filter, `^x` archive, `^r` rename, `^n` new).
+
 ### Environment
 
 | | |
