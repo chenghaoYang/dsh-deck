@@ -149,7 +149,6 @@ export interface Glyphs {
   hline: string
   vline: string
   corner: { tl: string; tr: string; bl: string; br: string }
-  tee: { left: string; right: string; down: string; up: string }
   bar: string
   arrow: string
 }
@@ -166,7 +165,6 @@ const UNICODE_GLYPHS: Glyphs = {
   hline: '─',
   vline: '│',
   corner: { tl: '╭', tr: '╮', bl: '╰', br: '╯' },
-  tee: { left: '├', right: '┤', down: '┬', up: '┴' },
   bar: '▎',
   arrow: '›',
 }
@@ -183,7 +181,6 @@ const ASCII_GLYPHS: Glyphs = {
   hline: '-',
   vline: '|',
   corner: { tl: '+', tr: '+', bl: '+', br: '+' },
-  tee: { left: '+', right: '+', down: '+', up: '+' },
   bar: '|',
   arrow: '>',
 }

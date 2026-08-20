@@ -143,8 +143,14 @@ export function graphemes(text: string): string[] {
 }
 
 /** Display columns for one grapheme cluster: 0, 1, or 2. */
-export function graphemeWidth(cluster: string): number {
+export function graphemeWidth(cluster: string): 0 | 1 | 2 {
   if (cluster.length === 0) return 0
+  // Fast path: a lone printable ASCII byte is always one cell — skip the
+  // range tables for the overwhelmingly common case.
+  if (cluster.length === 1) {
+    const cp = cluster.charCodeAt(0)
+    if (cp >= 0x20 && cp < 0x7f) return 1
+  }
   let printable = false
   let pua = false
   let emoji = false
@@ -266,7 +272,7 @@ export function wrap(text: string, columns: number): string[] {
     let line = ''
     let lineW = 0
     const flushLine = (): void => {
-      out.push(line.replace(/[ \t\u3000]+$/u, ''))
+      out.push(line.replace(/[ \t\u3000]+$/, ''))
       line = ''
       lineW = 0
     }

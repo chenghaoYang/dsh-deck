@@ -603,7 +603,7 @@ describe('DeckApp session management', () => {
     const confirmation = reduceSwitcher(start, { kind: 'backspace' })
     assert.equal(confirmation.kind, 'continue')
     if (confirmation.kind !== 'continue') return
-    const overlay = { kind: 'switcher' as const, state: confirmation.state }
+    const overlay = { kind: 'switcher' as const, live: true, state: confirmation.state }
     view.overlay = overlay
 
     view.onOverlayKey(overlay, { kind: 'enter' })

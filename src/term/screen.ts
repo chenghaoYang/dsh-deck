@@ -218,8 +218,8 @@ export class Screen {
     let c = col
     for (const g of graphemes(text)) {
       const w = graphemeWidth(g)
+      // graphemeWidth only yields 0, 1 or 2, so past this point w is 1 or 2.
       if (w === 0) continue
-      if (w !== 1 && w !== 2) continue
       if (c < 1) {
         c += w
         continue

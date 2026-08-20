@@ -6,16 +6,18 @@
 import type { TranscriptItem } from '../model/fold.ts'
 import type { Key } from '../term/input.ts'
 import { stringWidth, truncate } from '../term/width.ts'
-import type { Rect } from './layout.ts'
+import { centerBox, type Rect } from './layout.ts'
 import { paintFloatingPanel, type OverlayLine } from './overlay.ts'
 import {
   type RenderTarget,
   type Span,
+  isPrintableChar,
+  popGrapheme,
   spinnerGlyph,
+  unreadBadge,
+  windowStart,
 } from './render.ts'
 import type { Glyphs, Theme } from './theme.ts'
-
-const SEGMENTER = new Intl.Segmenter('en', { granularity: 'grapheme' })
 
 const LIST_FOOTER =
   '⏎ open · type to reply · ^s send+open · ^/ search · ^t pin · ⌥j/k reorder · ^g group · ^r rename · ^x stop · esc close'
@@ -914,12 +916,6 @@ function statusStyle(kind: 'blocked' | 'running' | 'error' | 'idle', theme: Them
   return theme.dim
 }
 
-function unreadBadge(unread: number): string {
-  if (unread <= 0) return ''
-  if (unread > 99) return '99+'
-  return String(unread)
-}
-
 function summarizeItem(item: TranscriptItem): string {
   switch (item.kind) {
     case 'assistant':
@@ -951,24 +947,6 @@ function windowList(lines: readonly OverlayLine[], height: number, cursor: numbe
   return lines.slice(start, start + height)
 }
 
-function windowStart(count: number, height: number, cursor: number): number {
-  if (count <= height || height <= 0) return 0
-  const maxStart = count - height
-  let start = cursor - Math.floor(height / 2)
-  if (start < 0) start = 0
-  if (start > maxStart) start = maxStart
-  return start
-}
-
-function popGrapheme(text: string): string {
-  const parts = [...SEGMENTER.segment(text)]
-  if (parts.length === 0) return ''
-  parts.pop()
-  let out = ''
-  for (const part of parts) out += part.segment
-  return out
-}
-
 function clampCursor(cursor: number, max: number): number {
   if (max < 0) return 0
   if (cursor < 0) return 0
@@ -976,21 +954,6 @@ function clampCursor(cursor: number, max: number): number {
   return cursor
 }
 
-function isPrintableChar(key: Key): key is { kind: 'char'; char: string } {
-  return key.kind === 'char' && key.char.length > 0
-}
-
 function isDigitOneToNine(char: string): boolean {
   return char >= '1' && char <= '9'
-}
-
-function centerBox(rect: Rect, width: number, height: number): Rect {
-  const w = Math.max(0, Math.min(width, Math.max(0, rect.width)))
-  const h = Math.max(0, Math.min(height, Math.max(0, rect.height)))
-  return {
-    row: rect.row + Math.floor((Math.max(0, rect.height) - h) / 2),
-    col: rect.col + Math.floor((Math.max(0, rect.width) - w) / 2),
-    width: w,
-    height: h,
-  }
 }

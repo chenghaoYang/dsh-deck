@@ -44,6 +44,20 @@ describe('width', () => {
     assert.equal(stringWidth('\uE0A0\uE0A1\uE0B0'), 3)
   })
 
+  it('printable ASCII is one cell', () => {
+    assert.equal(graphemeWidth('a'), 1)
+    assert.equal(graphemeWidth(' '), 1)
+    assert.equal(graphemeWidth('~'), 1)
+    assert.equal(stringWidth('a ~'), 3)
+  })
+
+  it('DEL is zero width (not the printable-ASCII fast path)', () => {
+    // 0x7f is outside 0x20–0x7e, so it falls through to the Cc/ZERO table.
+    assert.equal(graphemeWidth('\u007f'), 0)
+    assert.equal(stringWidth('\u007f'), 0)
+    assert.equal(stringWidth('a\u007fb'), 2)
+  })
+
   it('Latin, fullwidth, and hangul', () => {
     assert.equal(stringWidth('abc'), 3)
     assert.equal(stringWidth('Ａ'), 2)
@@ -87,6 +101,12 @@ describe('width', () => {
     }
     assert.ok(wrap('中文', 1).every((line) => stringWidth(line) <= 1 && line !== '中'))
     assert.deepEqual(wrap('hello\nworld', 20), ['hello', 'world'])
+  })
+
+  it('wrap trims trailing ideographic space', () => {
+    // flushLine uses /[ \t\u3000]+$/ without the `u` flag; \u3000 must still match.
+    assert.deepEqual(wrap('xx\u3000yy', 4), ['xx', 'yy'])
+    assert.deepEqual(wrap('hello\u3000world', 8), ['hello', 'world'])
   })
 
   it('stripAnsi removes CSI and OSC', () => {

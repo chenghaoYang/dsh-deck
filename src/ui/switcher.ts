@@ -9,16 +9,19 @@
 import type { Key } from '../term/input.ts'
 import { stringWidth, truncate } from '../term/width.ts'
 import type { Glyphs, Theme } from './theme.ts'
-import type { Rect } from './layout.ts'
+import { centerBox, type Rect } from './layout.ts'
 import {
   type RenderTarget,
   type Span,
+  clampIndex,
+  isPrintableChar,
   isSubsequence,
+  popGrapheme,
   spinnerGlyph,
+  unreadBadge,
+  windowStart,
 } from './render.ts'
 import { paintFloatingPanel, type OverlayLine } from './overlay.ts'
-
-const SEGMENTER = new Intl.Segmenter('en', { granularity: 'grapheme' })
 
 const LIST_FOOTER = '⏎ focus · ⌫/^d archive · ^r rename · ^n new · esc close'
 const RENAME_FOOTER = '⏎ save · esc back'
@@ -250,12 +253,6 @@ function statusGlyph(
   return { glyph: glyphs.idle, style: theme.dim }
 }
 
-function unreadBadge(unread: number): string {
-  if (unread <= 0) return ''
-  if (unread > 99) return '99+'
-  return String(unread)
-}
-
 function formatAge(updatedAt: number, now: number): string {
   const delta = Math.max(0, now - updatedAt)
   const minutes = Math.floor(delta / 60_000)
@@ -320,44 +317,4 @@ function rowSpans(
     spans.push(bit)
   }
   return spans
-}
-
-function windowStart(count: number, height: number, cursor: number): number {
-  if (count <= height || height <= 0) return 0
-  const maxStart = count - height
-  let start = cursor - Math.floor(height / 2)
-  if (start < 0) start = 0
-  if (start > maxStart) start = maxStart
-  return start
-}
-
-function popGrapheme(text: string): string {
-  const parts = [...SEGMENTER.segment(text)]
-  if (parts.length === 0) return ''
-  parts.pop()
-  let out = ''
-  for (const part of parts) out += part.segment
-  return out
-}
-
-function clampIndex(index: number, length: number): number {
-  if (length <= 0) return 0
-  if (index < 0) return 0
-  if (index >= length) return length - 1
-  return index
-}
-
-function isPrintableChar(key: Key): key is { kind: 'char'; char: string } {
-  return key.kind === 'char' && key.char.length > 0
-}
-
-function centerBox(rect: Rect, width: number, height: number): Rect {
-  const w = Math.max(0, Math.min(width, Math.max(0, rect.width)))
-  const h = Math.max(0, Math.min(height, Math.max(0, rect.height)))
-  return {
-    row: rect.row + Math.floor((Math.max(0, rect.height) - h) / 2),
-    col: rect.col + Math.floor((Math.max(0, rect.width) - w) / 2),
-    width: w,
-    height: h,
-  }
 }

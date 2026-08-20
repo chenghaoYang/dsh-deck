@@ -14,6 +14,7 @@ import {
   clearRect,
   makeLine,
   spinnerGlyph,
+  unreadBadge,
 } from './render.ts'
 
 export interface SidebarProps {
@@ -172,12 +173,6 @@ function sessionLabel(session: SessionState): { text: string; untitled: boolean 
     if (base !== undefined && base.length > 0) return { text: base, untitled: false }
   }
   return { text: 'untitled', untitled: true }
-}
-
-function unreadBadge(unread: number): string {
-  if (unread <= 0) return ''
-  if (unread > 99) return '99+'
-  return String(unread)
 }
 
 function waitingBadgeText(count: number): string {

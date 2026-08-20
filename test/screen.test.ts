@@ -1,53 +1,8 @@
 import assert from 'node:assert/strict'
-import { Readable } from 'node:stream'
 import { afterEach, describe, it } from 'node:test'
 import { beginSync, cursorTo, endSync, hideCursor, hyperlink, restoreTerminal, showCursor } from '../src/term/ansi.ts'
-import type { TerminalCapabilities } from '../src/term/capabilities.ts'
-import { InputReader, type Key } from '../src/term/input.ts'
 import { Screen } from '../src/term/screen.ts'
-
-function caps(over: Partial<TerminalCapabilities> = {}): TerminalCapabilities {
-  return {
-    isGhostty: true,
-    trueColor: true,
-    hyperlinks: true,
-    kittyGraphics: true,
-    notifications: true,
-    progress: true,
-    clipboard: true,
-    syncOutput: true,
-    unicodeCore: true,
-    ...over,
-  }
-}
-
-function fakeOut(columns = 40, rows = 8) {
-  let data = ''
-  const stream = {
-    columns,
-    rows,
-    isTTY: false,
-    write(chunk: string | Uint8Array) {
-      data += typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8')
-      return true
-    },
-    on() {
-      return stream
-    },
-    removeListener() {
-      return stream
-    },
-  }
-  return {
-    stream: stream as unknown as NodeJS.WriteStream,
-    get output() {
-      return data
-    },
-    clear() {
-      data = ''
-    },
-  }
-}
+import { caps, fakeOut } from './helpers/term.ts'
 
 const openScreens: Screen[] = []
 afterEach(() => {
@@ -280,73 +235,5 @@ describe('screen', () => {
     assert.ok(out.output.includes('X'), out.output)
     assert.ok(!out.output.includes('\u001b]8;'), out.output)
     assert.ok(!out.output.includes(hyperlink('https://example.com', 'X')), out.output)
-  })
-})
-
-describe('input', () => {
-  function collect(input: Readable): { reader: InputReader; keys: Key[] } {
-    const reader = new InputReader(input as unknown as NodeJS.ReadStream)
-    const keys: Key[] = []
-    reader.onKey((k) => keys.push(k))
-    reader.start()
-    return { reader, keys }
-  }
-
-  it('parses CSI arrows/nav, Ctrl+letter, Alt+letter', async () => {
-    const input = new Readable({ read() {} })
-    const { reader, keys } = collect(input)
-    input.push('\u001b[A\u001b[B\u001b[C\u001b[D')
-    input.push('\u001b[H\u001b[F\u001b[5~\u001b[6~\u001b[3~')
-    input.push('\u0003')
-    input.push('\u0001')
-    input.push('\u001bx')
-    await new Promise((r) => setImmediate(r))
-    reader.stop()
-    const kinds = keys.map((k) => ('char' in k ? `${k.kind}:${k.char}` : k.kind))
-    assert.deepEqual(kinds, [
-      'up',
-      'down',
-      'right',
-      'left',
-      'home',
-      'end',
-      'pageup',
-      'pagedown',
-      'delete',
-      'ctrl:c',
-      'ctrl:a',
-      'alt:x',
-    ])
-  })
-
-  it('bracketed paste with newlines is one paste event', async () => {
-    const input = new Readable({ read() {} })
-    const { reader, keys } = collect(input)
-    input.push('\u001b[200~hello\nworld\nline3\u001b[201~')
-    await new Promise((r) => setImmediate(r))
-    reader.stop()
-    assert.equal(keys.length, 1)
-    assert.deepEqual(keys[0], { kind: 'paste', text: 'hello\nworld\nline3' })
-  })
-
-  it('buffers a multi-byte character split across two chunks', async () => {
-    const input = new Readable({ read() {} })
-    const { reader, keys } = collect(input)
-    // 中 = E4 B8 AD
-    input.push(Buffer.from([0xe4, 0xb8]))
-    assert.equal(keys.length, 0)
-    input.push(Buffer.from([0xad]))
-    await new Promise((r) => setImmediate(r))
-    assert.deepEqual(keys, [{ kind: 'char', char: '中' }])
-    reader.stop()
-  })
-
-  it('Ctrl+C is a key event and does not kill the process', async () => {
-    const input = new Readable({ read() {} })
-    const { reader, keys } = collect(input)
-    input.push('\u0003')
-    await new Promise((r) => setImmediate(r))
-    reader.stop()
-    assert.deepEqual(keys, [{ kind: 'ctrl', char: 'c' }])
   })
 })

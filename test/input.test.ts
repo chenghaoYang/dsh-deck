@@ -2,19 +2,12 @@ import assert from 'node:assert/strict'
 import { Readable } from 'node:stream'
 import { describe, it } from 'node:test'
 import { InputReader, type Key } from '../src/term/input.ts'
+import { collectKeys as collect } from './helpers/term.ts'
 
 const ESC = '\u001b'
 
 function sgrMouse(pb: number, col: number, row: number, release = false): string {
   return `${ESC}[<${pb};${col};${row}${release ? 'm' : 'M'}`
-}
-
-function collect(input: Readable): { reader: InputReader; keys: Key[] } {
-  const reader = new InputReader(input as unknown as NodeJS.ReadStream)
-  const keys: Key[] = []
-  reader.onKey((k) => keys.push(k))
-  reader.start()
-  return { reader, keys }
 }
 
 function mouse(
@@ -329,5 +322,98 @@ describe('ctrl C0 and CSI-u printables', () => {
     await new Promise((r) => setImmediate(r))
     reader.stop()
     assert.deepEqual(keys, [{ kind: 'ctrl', char: '/' }])
+  })
+})
+
+describe('plain key input', () => {
+  it('parses CSI arrows/nav, Ctrl+letter, Alt+letter', async () => {
+    const input = new Readable({ read() {} })
+    const { reader, keys } = collect(input)
+    input.push('\u001b[A\u001b[B\u001b[C\u001b[D')
+    input.push('\u001b[H\u001b[F\u001b[5~\u001b[6~\u001b[3~')
+    input.push('\u0003')
+    input.push('\u0001')
+    input.push('\u001bx')
+    await new Promise((r) => setImmediate(r))
+    reader.stop()
+    const kinds = keys.map((k) => ('char' in k ? `${k.kind}:${k.char}` : k.kind))
+    assert.deepEqual(kinds, [
+      'up',
+      'down',
+      'right',
+      'left',
+      'home',
+      'end',
+      'pageup',
+      'pagedown',
+      'delete',
+      'ctrl:c',
+      'ctrl:a',
+      'alt:x',
+    ])
+  })
+
+  it('bracketed paste with newlines is one paste event', async () => {
+    const input = new Readable({ read() {} })
+    const { reader, keys } = collect(input)
+    input.push('\u001b[200~hello\nworld\nline3\u001b[201~')
+    await new Promise((r) => setImmediate(r))
+    reader.stop()
+    assert.equal(keys.length, 1)
+    assert.deepEqual(keys[0], { kind: 'paste', text: 'hello\nworld\nline3' })
+  })
+
+  it('buffers a multi-byte character split across two chunks', async () => {
+    const input = new Readable({ read() {} })
+    const { reader, keys } = collect(input)
+    // 中 = E4 B8 AD
+    input.push(Buffer.from([0xe4, 0xb8]))
+    assert.equal(keys.length, 0)
+    input.push(Buffer.from([0xad]))
+    await new Promise((r) => setImmediate(r))
+    assert.deepEqual(keys, [{ kind: 'char', char: '中' }])
+    reader.stop()
+  })
+
+  it('Ctrl+C is a key event and does not kill the process', async () => {
+    const input = new Readable({ read() {} })
+    const { reader, keys } = collect(input)
+    input.push('\u0003')
+    await new Promise((r) => setImmediate(r))
+    reader.stop()
+    assert.deepEqual(keys, [{ kind: 'ctrl', char: 'c' }])
+  })
+
+  it('holds a split SS3 sequence until its final byte arrives', async () => {
+    const input = new Readable({ read() {} })
+    const { reader, keys } = collect(input)
+    // ESC O A (up) split three ways: ESC | O | A and ESC O | A.
+    input.push(`${ESC}`)
+    await new Promise((r) => setImmediate(r))
+    assert.equal(keys.length, 0)
+    input.push('O')
+    await new Promise((r) => setImmediate(r))
+    assert.equal(keys.length, 0)
+    input.push('A')
+    await new Promise((r) => setImmediate(r))
+    assert.deepEqual(keys, [{ kind: 'up' }])
+
+    input.push(`${ESC}O`)
+    await new Promise((r) => setImmediate(r))
+    assert.equal(keys.length, 1)
+    input.push('M')
+    await new Promise((r) => setImmediate(r))
+    reader.stop()
+    assert.deepEqual(keys, [{ kind: 'up' }, { kind: 'enter' }])
+  })
+
+  it('flushes a dangling SS3 prefix on stop as escape', async () => {
+    const input = new Readable({ read() {} })
+    const { reader, keys } = collect(input)
+    input.push(`${ESC}O`)
+    await new Promise((r) => setImmediate(r))
+    reader.stop()
+    // Like incomplete CSI: escape first, then the leftover byte as a char.
+    assert.deepEqual(keys, [{ kind: 'escape' }, { kind: 'char', char: 'O' }])
   })
 })

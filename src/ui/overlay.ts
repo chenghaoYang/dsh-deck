@@ -18,21 +18,22 @@ import type {
   CommandDescriptor,
 } from '../protocol/contract.ts'
 import type { Glyphs, Theme } from './theme.ts'
-import type { Rect } from './layout.ts'
+import { centerBox, type Rect } from './layout.ts'
 import {
   type RenderTarget,
   type Span,
+  clampIndex,
   clearRect,
   clipToWidth,
   fitSpans,
+  isPrintableChar,
   isSubsequence,
   paintLine,
+  popGrapheme,
   repeatToWidth,
   spansWidth,
   wrapLines,
 } from './render.ts'
-
-const SEGMENTER = new Intl.Segmenter('en', { granularity: 'grapheme' })
 
 const IMAGE_FOOTER = 'esc close · y copy label'
 
@@ -43,17 +44,6 @@ const IMAGE_FOOTER = 'esc close · y copy label'
 
 export interface OverlayLine {
   spans: Span[]
-}
-
-function centerBox(rect: Rect, width: number, height: number): Rect {
-  const w = Math.max(0, Math.min(width, Math.max(0, rect.width)))
-  const h = Math.max(0, Math.min(height, Math.max(0, rect.height)))
-  return {
-    row: rect.row + Math.floor((Math.max(0, rect.height) - h) / 2),
-    col: rect.col + Math.floor((Math.max(0, rect.width) - w) / 2),
-    width: w,
-    height: h,
-  }
 }
 
 /** Command suggestions belong next to the composer, not in the visual center. */
@@ -222,26 +212,6 @@ function windowAround(
   if (start < 0) start = 0
   if (start > maxStart) start = maxStart
   return lines.slice(start, start + height)
-}
-
-function popGrapheme(text: string): string {
-  const parts = [...SEGMENTER.segment(text)]
-  if (parts.length === 0) return ''
-  parts.pop()
-  let out = ''
-  for (const part of parts) out += part.segment
-  return out
-}
-
-function clampIndex(index: number, length: number): number {
-  if (length <= 0) return 0
-  if (index < 0) return 0
-  if (index >= length) return length - 1
-  return index
-}
-
-function isPrintableChar(key: Key): key is { kind: 'char'; char: string } {
-  return key.kind === 'char' && key.char.length > 0
 }
 
 // ---------------------------------------------------------------------------

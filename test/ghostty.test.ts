@@ -6,38 +6,7 @@ import {
   TerminalIntegration,
   encodeKittyPng,
 } from '../src/term/ghostty.ts'
-import type { TerminalCapabilities } from '../src/term/capabilities.ts'
-
-function caps(over: Partial<TerminalCapabilities> = {}): TerminalCapabilities {
-  return {
-    isGhostty: true,
-    trueColor: true,
-    hyperlinks: true,
-    kittyGraphics: true,
-    notifications: true,
-    progress: true,
-    clipboard: true,
-    syncOutput: true,
-    unicodeCore: true,
-    ...over,
-  }
-}
-
-function fakeOut() {
-  let data = ''
-  const stream = {
-    write(chunk: string | Uint8Array) {
-      data += typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8')
-      return true
-    },
-  }
-  return {
-    stream: stream as unknown as NodeJS.WriteStream,
-    get output() {
-      return data
-    },
-  }
-}
+import { caps, fakeOut } from './helpers/term.ts'
 
 function kittyChunks(seq: string): RegExpMatchArray[] {
   return [...seq.matchAll(/\u001b_G([^;]*);([A-Za-z0-9+/=]*)\u001b\\/g)]

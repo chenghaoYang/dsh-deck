@@ -9,13 +9,15 @@
 import type { Key } from '../term/input.ts'
 import { stringWidth, truncate } from '../term/width.ts'
 import type { Glyphs, Theme } from './theme.ts'
-import type { Rect } from './layout.ts'
+import { centerBox, type Rect } from './layout.ts'
 import {
   type RenderTarget,
   type Span,
+  clampIndex,
   fitSpans,
   padTo,
   spansWidth,
+  windowStart,
 } from './render.ts'
 import { paintFloatingPanel, type OverlayLine } from './overlay.ts'
 
@@ -392,31 +394,4 @@ function listCount(state: ModesState): number {
 function listCursor(state: ModesState): number {
   if (state.level === 'options') return clampIndex(state.optionCursor, listCount(state))
   return clampIndex(state.cursor, state.rows.length)
-}
-
-function windowStart(count: number, height: number, cursor: number): number {
-  if (count <= height || height <= 0) return 0
-  const maxStart = count - height
-  let start = cursor - Math.floor(height / 2)
-  if (start < 0) start = 0
-  if (start > maxStart) start = maxStart
-  return start
-}
-
-function clampIndex(index: number, length: number): number {
-  if (length <= 0) return 0
-  if (index < 0) return 0
-  if (index >= length) return length - 1
-  return index
-}
-
-function centerBox(rect: Rect, width: number, height: number): Rect {
-  const w = Math.max(0, Math.min(width, Math.max(0, rect.width)))
-  const h = Math.max(0, Math.min(height, Math.max(0, rect.height)))
-  return {
-    row: rect.row + Math.floor((Math.max(0, rect.height) - h) / 2),
-    col: rect.col + Math.floor((Math.max(0, rect.width) - w) / 2),
-    width: w,
-    height: h,
-  }
 }

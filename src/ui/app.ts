@@ -154,7 +154,7 @@ type Overlay =
   | { kind: 'question'; sessionId: SessionId; rpcId: RpcId; state: QuestionOverlayState }
   | { kind: 'picker'; sessionId: SessionId; state: PickerOverlayState }
   | { kind: 'image'; alt: string; data: Uint8Array; transmitted: boolean; layout?: ImageOverlayLayout }
-  | { kind: 'switcher'; state: SwitcherState }
+  | { kind: 'switcher'; state: SwitcherState; live: boolean }
   | { kind: 'modes'; sessionId: SessionId; state: ModesState }
   | { kind: 'commands'; sessionId: SessionId; state: CommandPaletteState }
   | { kind: 'info'; state: InfoOverlayState }
@@ -465,6 +465,16 @@ export class DeckApp {
   }
 
   private refreshLiveOverlays(): void {
+    if (this.overlay?.kind === 'switcher' && this.overlay.live) {
+      // Store-driven list: titles, unread badges and run states keep moving
+      // while the palette is open. Server search results (live: false) are a
+      // static snapshot and must not be clobbered.
+      this.overlay = {
+        ...this.overlay,
+        state: updateSwitcherEntries(this.overlay.state, this.switcherEntries()),
+      }
+      return
+    }
     if (this.overlay?.kind === 'dashboard') {
       this.overlay = {
         kind: 'dashboard',
@@ -746,7 +756,7 @@ export class DeckApp {
 
   private openSwitcher(): void {
     if (this.overlay !== undefined) return
-    this.overlay = { kind: 'switcher', state: createSwitcher(this.switcherEntries(), this.store.focusedId) }
+    this.overlay = { kind: 'switcher', live: true, state: createSwitcher(this.switcherEntries(), this.store.focusedId) }
     this.requestFrame()
   }
 
@@ -912,7 +922,7 @@ export class DeckApp {
       else this.focus(next.id)
     }
     if (this.overlay?.kind === 'switcher') {
-      this.overlay = { kind: 'switcher', state: updateSwitcherEntries(this.overlay.state, this.switcherEntries()) }
+      this.overlay = { ...this.overlay, state: updateSwitcherEntries(this.overlay.state, this.switcherEntries()) }
     }
     if (this.overlay?.kind === 'dashboard') {
       this.overlay = {
@@ -1117,9 +1127,9 @@ export class DeckApp {
     if (overlay.kind === 'switcher') {
       const result = reduceSwitcher(overlay.state, key)
       switch (result.kind) {
-        case 'continue': this.overlay = { kind: 'switcher', state: result.state }; break
+        case 'continue': this.overlay = { ...overlay, state: result.state }; break
         case 'focus': this.overlay = undefined; this.focus(result.id); break
-        case 'archive': this.overlay = { kind: 'switcher', state: result.state }; void this.archiveSession(result.id); break
+        case 'archive': this.overlay = { ...overlay, state: result.state }; void this.archiveSession(result.id); break
         case 'rename': this.overlay = undefined; void this.renameSession(result.id, result.title); break
         case 'create': this.overlay = undefined; void this.createSession(); break
         case 'cancelled': this.overlay = undefined; break
@@ -1578,7 +1588,7 @@ export class DeckApp {
     if (focused === undefined || !this.canOpenOverlayFor(focused.id)) return
     if (!result.ok) {
       const state = createSwitcher(this.switcherEntries(), this.store.focusedId)
-      this.overlay = { kind: 'switcher', state: { ...state, filter: query, cursor: 0 } }
+      this.overlay = { kind: 'switcher', live: true, state: { ...state, filter: query, cursor: 0 } }
       this.notice(`server search unavailable; filtering titles locally`, 'warn')
       this.requestFrame()
       return
@@ -1596,7 +1606,7 @@ export class DeckApp {
         updatedAt: session.updatedAt,
       }]
     })
-    this.overlay = { kind: 'switcher', state: createSwitcher(entries, this.store.focusedId) }
+    this.overlay = { kind: 'switcher', live: false, state: createSwitcher(entries, this.store.focusedId) }
     if (result.value.hasMore) this.notice('showing the first 20 search results', 'info')
     this.requestFrame()
   }
@@ -2349,17 +2359,21 @@ export class DeckApp {
       return
     }
     const childMode = await this.subagentMode(session)
-    if (session.origin === 'subagent' && (session.parentSessionId === undefined || childMode !== 'continuable')) {
-      this.notice('this subagent cannot be interrupted', 'warn')
-      return
-    }
-    const result = session.origin === 'subagent'
-      ? await this.client.call('subagent.interrupt', {
-        parentSessionId: session.parentSessionId!,
+    let result: RpcCallResult<'subagent.interrupt'> | RpcCallResult<'session.cancel'>
+    if (session.origin === 'subagent') {
+      const parentSessionId = session.parentSessionId
+      if (parentSessionId === undefined || childMode !== 'continuable') {
+        this.notice('this subagent cannot be interrupted', 'warn')
+        return
+      }
+      result = await this.client.call('subagent.interrupt', {
+        parentSessionId,
         childSessionId: session.id,
         mode: 'continuable',
       })
-      : await this.client.call('session.cancel', { sessionId: session.id })
+    } else {
+      result = await this.client.call('session.cancel', { sessionId: session.id })
+    }
     if (!result.ok) this.notice(`cancel failed: ${result.error.message}`, 'error')
     else this.notice('cancelled', 'info')
   }

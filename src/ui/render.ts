@@ -7,6 +7,7 @@
  */
 
 import { stringWidth, wrap } from '../term/width.ts'
+import type { Key } from '../term/input.ts'
 import type { Glyphs } from './theme.ts'
 import type { Rect } from './layout.ts'
 
@@ -194,4 +195,43 @@ export function isSubsequence(query: string, haystack: string): boolean {
     }
   }
   return false
+}
+
+/** Clamp a list cursor into [0, length-1]; empty lists pin to 0. */
+export function clampIndex(index: number, length: number): number {
+  if (length <= 0) return 0
+  if (index < 0) return 0
+  if (index >= length) return length - 1
+  return index
+}
+
+/** First index of a scrolling window that keeps the cursor roughly centered. */
+export function windowStart(count: number, height: number, cursor: number): number {
+  if (count <= height || height <= 0) return 0
+  const maxStart = count - height
+  let start = cursor - Math.floor(height / 2)
+  if (start < 0) start = 0
+  if (start > maxStart) start = maxStart
+  return start
+}
+
+/** Badge text for an unread counter; '' when nothing is pending. */
+export function unreadBadge(unread: number): string {
+  if (unread <= 0) return ''
+  if (unread > 99) return '99+'
+  return String(unread)
+}
+
+/** Drop the final grapheme cluster (backspace semantics for draft strings). */
+export function popGrapheme(text: string): string {
+  const parts = [...segmenter.segment(text)]
+  if (parts.length === 0) return ''
+  parts.pop()
+  let out = ''
+  for (const part of parts) out += part.segment
+  return out
+}
+
+export function isPrintableChar(key: Key): key is { kind: 'char'; char: string } {
+  return key.kind === 'char' && key.char.length > 0
 }

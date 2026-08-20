@@ -89,3 +89,15 @@ export const MIN_ROWS = 10
 export function viewportTooSmall(columns: number, rows: number): boolean {
   return columns < MIN_COLUMNS || rows < MIN_ROWS
 }
+
+/** Clamp `width`x`height` into `rect` and center the result inside it. */
+export function centerBox(rect: Rect, width: number, height: number): Rect {
+  const w = Math.max(0, Math.min(width, Math.max(0, rect.width)))
+  const h = Math.max(0, Math.min(height, Math.max(0, rect.height)))
+  return {
+    row: rect.row + Math.floor((Math.max(0, rect.height) - h) / 2),
+    col: rect.col + Math.floor((Math.max(0, rect.width) - w) / 2),
+    width: w,
+    height: h,
+  }
+}
