@@ -25,6 +25,8 @@
   "files": [
     "bin",
     "lib",
+    "src",
+    "docs",
     "LICENSE",
     "SPEC.md",
     "README.md"
@@ -32,6 +34,7 @@
   "//": "scripts/ is intentionally not published: pty-bridge.py and verify-live.mjs are development tools, not runtime dependencies.",
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "prepare": "npm run build",
     "start": "node --experimental-strip-types src/cli.ts",
     "dev": "node --experimental-strip-types --watch src/cli.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",

@@ -38,7 +38,11 @@ export interface SessionState {
   /** Loaded lazily; false until the first history fetch resolves. */
   historyLoaded: boolean
   hasMoreHistory: boolean
+  /** All answerable approvals in arrival order; the singular field is the active head. */
+  pendingApprovals?: readonly PendingApproval[]
   pendingApproval?: PendingApproval
+  /** All answerable question batches in arrival order; the singular field is the active head. */
+  pendingQuestions?: readonly PendingQuestion[]
   pendingQuestion?: PendingQuestion
   queue: QueuedInboxItem[]
   /** Unseen activity since the user last focused this session. */
@@ -137,6 +141,19 @@ export class DeckStore {
     this.emit({ kind: 'sessions' })
   }
 
+  /** Clear only the local view; the durable host log remains available on reconnect. */
+  clearTranscriptView(id: SessionId): void {
+    const session = this.byId.get(id)
+    if (session === undefined) return
+    this.byId.set(id, {
+      ...session,
+      transcript: emptyTranscript(),
+      historyLoaded: true,
+      hasMoreHistory: false,
+    })
+    this.emit({ kind: 'transcript', sessionId: id })
+  }
+
   applyMux(frame: MuxFrame, rpcId: RpcId): void {
     switch (frame.type) {
       case 'session/event':
@@ -229,6 +246,8 @@ export class DeckStore {
         transcript: prev?.transcript ?? emptyTranscript(),
         historyLoaded: prev?.historyLoaded ?? false,
         hasMoreHistory: prev?.hasMoreHistory ?? false,
+        pendingApprovals: prev === undefined ? [] : pendingApprovalsOf(prev),
+        pendingQuestions: prev === undefined ? [] : pendingQuestionsOf(prev),
         queue: prev?.queue ?? [],
         unread: prev?.unread ?? 0,
         telemetry: prev?.telemetry ?? {},
@@ -271,6 +290,8 @@ export class DeckStore {
         transcript: emptyTranscript(),
         historyLoaded: false,
         hasMoreHistory: session.hasMoreHistory,
+        pendingApprovals: [],
+        pendingQuestions: [],
         queue: [],
         unread: session.unread,
         telemetry: session.telemetry,
@@ -349,7 +370,17 @@ export class DeckStore {
     if (frame.callId !== undefined) {
       transcript = patchToolStatus(transcript, frame.callId, 'awaiting-approval')
     }
-    const next: SessionState = { ...session, transcript, pendingApproval: pending }
+    const approvals = pendingApprovalsOf(session)
+    // A mux-open replay repeats the same rpcId. It is not a second ask; other
+    // IDs are genuine parallel approvals and must remain answerable.
+    if (approvals.some((item) => item.rpcId === pending.rpcId || item.approvalId === pending.approvalId)) return
+    const pendingApprovals = [...approvals, pending]
+    const next: SessionState = {
+      ...session,
+      transcript,
+      pendingApprovals,
+      ...activeApproval(pendingApprovals),
+    }
     this.byId.set(frame.sessionId, next)
     this.emit({ kind: 'approval', sessionId: frame.sessionId })
     if (transcript !== session.transcript) this.emit({ kind: 'transcript', sessionId: frame.sessionId })
@@ -360,15 +391,27 @@ export class DeckStore {
   ): void {
     const session = this.byId.get(frame.sessionId)
     if (session === undefined) return
-    const callId = session.pendingApproval?.callId
-    const { pendingApproval: _drop, ...rest } = session
-    void _drop
-    let transcript = rest.transcript
+    const approvals = pendingApprovalsOf(session)
+    const index = approvals.findIndex((item) => item.approvalId === frame.approvalId)
+    // A stale/unknown resolution must not clear the active approval.
+    if (index < 0) return
+    const resolved = approvals[index]
+    if (resolved === undefined) return
+    const pendingApprovals = approvals.slice(0, index).concat(approvals.slice(index + 1))
+    const callId = resolved.callId
+    let transcript = session.transcript
     if (callId !== undefined) {
       const status = frame.outcome === 'allowed-once' ? 'running' : 'cancelled'
       transcript = patchToolStatus(transcript, callId, status)
     }
-    const next: SessionState = { ...rest, transcript, queue: rest.queue }
+    const { pendingApproval: _oldApproval, ...withoutApproval } = session
+    void _oldApproval
+    const next: SessionState = {
+      ...withoutApproval,
+      transcript,
+      pendingApprovals,
+      ...activeApproval(pendingApprovals),
+    }
     this.byId.set(frame.sessionId, next)
     this.emit({ kind: 'approval', sessionId: frame.sessionId })
     if (transcript !== session.transcript) this.emit({ kind: 'transcript', sessionId: frame.sessionId })
@@ -384,7 +427,16 @@ export class DeckStore {
       questions: frame.questions.slice(),
       at: Date.now(),
     }
-    const next: SessionState = { ...session, pendingQuestion: pending, updatedAt: pending.at }
+    const questions = pendingQuestionsOf(session)
+    // A reconnect replay has the same rpcId; parallel batches have distinct IDs.
+    if (questions.some((item) => item.rpcId === pending.rpcId)) return
+    const pendingQuestions = [...questions, pending]
+    const next: SessionState = {
+      ...session,
+      pendingQuestions,
+      ...activeQuestion(pendingQuestions),
+      updatedAt: pending.at,
+    }
     if (this.focusedId !== frame.sessionId) next.unread = session.unread + 1
     this.byId.set(frame.sessionId, next)
     this.emit({ kind: 'question', sessionId: frame.sessionId })
@@ -396,10 +448,17 @@ export class DeckStore {
   ): void {
     const session = this.byId.get(frame.sessionId)
     if (session === undefined) return
-    if (session.pendingQuestion?.rpcId !== frame.questionRpcId) return
-    const { pendingQuestion: _drop, ...rest } = session
-    void _drop
-    this.byId.set(frame.sessionId, { ...rest, queue: rest.queue, telemetry: rest.telemetry })
+    const questions = pendingQuestionsOf(session)
+    const index = questions.findIndex((item) => item.rpcId === frame.questionRpcId)
+    if (index < 0) return
+    const pendingQuestions = questions.slice(0, index).concat(questions.slice(index + 1))
+    const { pendingQuestion: _oldQuestion, ...withoutQuestion } = session
+    void _oldQuestion
+    this.byId.set(frame.sessionId, {
+      ...withoutQuestion,
+      pendingQuestions,
+      ...activeQuestion(pendingQuestions),
+    })
     this.emit({ kind: 'question', sessionId: frame.sessionId })
   }
 
@@ -472,6 +531,8 @@ export class DeckStore {
       transcript: prev?.transcript ?? emptyTranscript(),
       historyLoaded: prev?.historyLoaded ?? false,
       hasMoreHistory: prev?.hasMoreHistory ?? false,
+      pendingApprovals: prev === undefined ? [] : pendingApprovalsOf(prev),
+      pendingQuestions: prev === undefined ? [] : pendingQuestionsOf(prev),
       queue: prev?.queue ?? [],
       unread: prev?.unread ?? 0,
       telemetry: prev?.telemetry ?? {},
@@ -494,6 +555,8 @@ export class DeckStore {
       transcript: emptyTranscript(),
       historyLoaded: false,
       hasMoreHistory: false,
+      pendingApprovals: [],
+      pendingQuestions: [],
       queue: [],
       unread: 0,
       telemetry: {},
@@ -531,6 +594,32 @@ export class DeckStore {
       }
     })
   }
+}
+
+/** Return the full approval queue, including compatibility with legacy fixtures. */
+export function pendingApprovalsOf(
+  session: Pick<SessionState, 'pendingApprovals' | 'pendingApproval'>,
+): readonly PendingApproval[] {
+  if (session.pendingApprovals !== undefined) return session.pendingApprovals
+  return session.pendingApproval === undefined ? [] : [session.pendingApproval]
+}
+
+/** Return the full question queue, including compatibility with legacy fixtures. */
+export function pendingQuestionsOf(
+  session: Pick<SessionState, 'pendingQuestions' | 'pendingQuestion'>,
+): readonly PendingQuestion[] {
+  if (session.pendingQuestions !== undefined) return session.pendingQuestions
+  return session.pendingQuestion === undefined ? [] : [session.pendingQuestion]
+}
+
+function activeApproval(items: readonly PendingApproval[]): { pendingApproval?: PendingApproval } {
+  const active = items[0]
+  return active === undefined ? {} : { pendingApproval: active }
+}
+
+function activeQuestion(items: readonly PendingQuestion[]): { pendingQuestion?: PendingQuestion } {
+  const active = items[0]
+  return active === undefined ? {} : { pendingQuestion: active }
 }
 
 function mergeHistory(

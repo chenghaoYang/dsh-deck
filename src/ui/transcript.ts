@@ -103,8 +103,9 @@ export function renderTranscript(
   const end = lines.length - offset
   const start = Math.max(0, end - visible)
   const window = lines.slice(start, end)
-  // Chat pin: fewer lines than the pane sit on the bottom edge.
-  const row0 = rect.row + (visible - window.length)
+  // Short conversations start beneath the header. Bottom-pinning a three-line
+  // reply in a 46-row Ghostty window makes the app look empty or broken.
+  const row0 = rect.row
   for (let i = 0; i < window.length; i++) {
     const line = window[i]
     if (line === undefined) continue

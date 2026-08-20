@@ -3,7 +3,7 @@
  * continuation is never flushed on its own. `put`/`fill` are 1-based so they
  * match `cursorTo` and Module D's layout rects.
  *
- * close() is idempotent and is hooked to exit / SIGINT / SIGTERM /
+ * close() is idempotent and is hooked to exit / SIGINT / SIGTERM / SIGHUP /
  * uncaughtException so a crash cannot leave an invisible cursor, a stuck
  * OSC 9;4 bar, or a terminal still reporting mouse (`CSI ?1002l` `CSI ?1006l`).
  */
@@ -18,6 +18,7 @@ import {
   eraseDisplay,
   hideCursor,
   restoreTerminal,
+  showCursor,
 } from './ansi.ts'
 import type { TerminalCapabilities } from './capabilities.ts'
 import { graphemeWidth, graphemes } from './width.ts'
@@ -68,6 +69,7 @@ export class Screen {
   #cursorRow = -1
   #cursorCol = -1
   #style = ''
+  #caretVisible = false
 
   constructor(out: NodeJS.WriteStream, caps: TerminalCapabilities) {
     this.#out = out
@@ -100,6 +102,7 @@ export class Screen {
     process.on('exit', this.#onExit)
     process.on('SIGINT', this.#onSigint)
     process.on('SIGTERM', this.#onSigterm)
+    process.on('SIGHUP', this.#onSighup)
     process.on('uncaughtException', this.#onUncaught)
     process.on('uncaughtExceptionMonitor', this.#onUncaughtMonitor)
   }
@@ -120,12 +123,34 @@ export class Screen {
     process.removeListener('exit', this.#onExit)
     process.removeListener('SIGINT', this.#onSigint)
     process.removeListener('SIGTERM', this.#onSigterm)
+    process.removeListener('SIGHUP', this.#onSighup)
     process.removeListener('uncaughtException', this.#onUncaught)
     process.removeListener('uncaughtExceptionMonitor', this.#onUncaughtMonitor)
     // Always DECRST mouse here (even if already off). ansi.ts restoreTerminal
     // does not own 1002/1006; a crash must not leave the tty reporting mouse.
     this.#mouseEnabled = false
+    this.#caretVisible = false
     this.#write(MOUSE_OFF + restoreTerminal())
+  }
+
+  /** Position and reveal the application caret after a completed frame. */
+  showCursorAt(row: number, col: number): void {
+    if (!this.#opened || this.#closed) return
+    const nextRow = Math.max(1, row | 0)
+    const nextCol = Math.max(1, col | 0)
+    // The cell diff may have moved the terminal cursor to the last changed
+    // cell since the previous frame, so reposition on every completed frame.
+    let out = cursorTo(nextRow, nextCol)
+    if (!this.#caretVisible) out += showCursor()
+    this.#caretVisible = true
+    this.#write(out)
+  }
+
+  /** Hide the application caret while a modal overlay owns the screen. */
+  hideCursor(): void {
+    if (!this.#opened || this.#closed || !this.#caretVisible) return
+    this.#caretVisible = false
+    this.#write(hideCursor())
   }
 
   /**
@@ -317,6 +342,11 @@ export class Screen {
   #onSigterm = (): void => {
     this.close()
     process.exit(143)
+  }
+
+  #onSighup = (): void => {
+    this.close()
+    process.exit(129)
   }
 
   /** Monitor restores without swallowing Node's default crash. */

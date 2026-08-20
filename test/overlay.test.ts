@@ -8,11 +8,14 @@ import type { Rect } from '../src/ui/layout.ts'
 import type { RenderTarget } from '../src/ui/render.ts'
 import type { Glyphs, Theme } from '../src/ui/theme.ts'
 import {
+  createCommandPalette,
   createPickerOverlay,
   createQuestionOverlay,
   layoutImageOverlay,
+  reduceCommandPalette,
   reducePickerOverlay,
   reduceQuestionOverlay,
+  renderCommandPalette,
   renderImageOverlayChrome,
   renderPickerOverlay,
   renderQuestionOverlay,
@@ -285,10 +288,56 @@ describe('reduceQuestionOverlay', () => {
   it('escape cancels the whole overlay, including mid-batch', () => {
     const start = createQuestionOverlay(questions)
     assert.equal(reduceQuestionOverlay(start, { kind: 'escape' }).kind, 'cancelled')
+    assert.equal(reduceQuestionOverlay(start, { kind: 'ctrl', char: 'c' }).kind, 'cancelled')
     const mid = mustContinueQ(reduceQuestionOverlay(start, { kind: 'enter' }))
     assert.equal(reduceQuestionOverlay(mid, { kind: 'escape' }).kind, 'cancelled')
     const other = mustContinueQ(reduceQuestionOverlay(start, { kind: 'char', char: 'o' }))
     assert.equal(reduceQuestionOverlay(other, { kind: 'escape' }).kind, 'cancelled')
+  })
+})
+
+describe('slash command palette', () => {
+  const commands = [
+    { name: 'model', description: 'Switch model', action: 'model' as const },
+    { name: 'modes', description: 'All session modes', action: 'modes' as const },
+    { name: 'permission', description: 'Switch permission', input: { hint: '<preset>' } },
+    { name: 'plan', description: 'Toggle plan mode' },
+  ]
+
+  it('filters by prefix, moves, runs, completes, and restores input on escape', () => {
+    let state = createCommandPalette(commands, 'mo')
+    let result = reduceCommandPalette(state, { kind: 'down' })
+    assert.equal(result.kind, 'continue')
+    if (result.kind !== 'continue') return
+    state = result.state
+
+    result = reduceCommandPalette(state, { kind: 'enter' })
+    assert.equal(result.kind, 'run')
+    if (result.kind === 'run') assert.equal(result.command.name, 'modes')
+
+    const completed = reduceCommandPalette(createCommandPalette(commands, 'per'), { kind: 'tab' })
+    assert.equal(completed.kind, 'complete')
+    if (completed.kind === 'complete') assert.equal(completed.command.name, 'permission')
+
+    assert.deepEqual(
+      reduceCommandPalette(createCommandPalette(commands, 'pla'), { kind: 'escape' }),
+      { kind: 'cancelled', input: '/pla' },
+    )
+    assert.deepEqual(
+      reduceCommandPalette(createCommandPalette(commands), { kind: 'backspace' }),
+      { kind: 'cancelled', input: '' },
+    )
+  })
+
+  it('renders a bottom-anchored, bounded menu with names and descriptions', () => {
+    const rect: Rect = { row: 2, col: 5, width: 80, height: 20 }
+    const target = new BoundsTarget(rect)
+    renderCommandPalette(target, rect, createCommandPalette(commands, 'p'), theme, glyphs)
+    const plain = target.puts.map((put) => put.text).join('')
+    assert.ok(plain.includes('/permission'))
+    assert.ok(plain.includes('Switch permission'))
+    const commandRows = target.puts.filter((put) => put.text.includes('/permission'))
+    assert.ok(commandRows.every((put) => put.row >= rect.row + rect.height - 8))
   })
 })
 
@@ -334,6 +383,21 @@ describe('reducePickerOverlay', () => {
       model: 'chat',
       reasoningEffort: 'medium',
     })
+  })
+
+  it('prefers the session current effort over the catalog default', () => {
+    const models: readonly PickerModel[] = [
+      { ...pickerModels[0]!, currentEffort: 'high' },
+      ...pickerModels.slice(1),
+    ]
+    const stage = reducePickerOverlay(createPickerOverlay(models), { kind: 'enter' })
+    const state = mustContinueP(stage)
+    assert.equal(state.effortCursor, 2)
+
+    const picked = reducePickerOverlay(state, { kind: 'enter' })
+    assert.equal(picked.kind, 'picked')
+    if (picked.kind !== 'picked') return
+    assert.equal(picked.selection.reasoningEffort, 'high')
   })
 
   it('effort stage down then enter picks a non-default effort', () => {
@@ -401,6 +465,10 @@ function paintAllOverlays(rect: Rect): BoundsTarget {
   renderPickerOverlay(target, rect, picker, theme, glyphs)
   renderPickerOverlay(target, rect, pickerEfforts, theme, glyphs)
   renderPickerOverlay(target, rect, pickerFilter, theme, glyphs)
+  renderCommandPalette(target, rect, createCommandPalette([
+    { name: 'model', description: 'Switch model', action: 'model' },
+    { name: 'permission', description: 'Switch permission', input: { hint: '<preset>' } },
+  ]), theme, glyphs)
 
   const fitted = layoutImageOverlay(rect, '示意图'.repeat(20), {
     preferredColumns: 80,

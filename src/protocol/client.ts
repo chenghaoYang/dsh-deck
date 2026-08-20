@@ -133,11 +133,24 @@ export class DeckClient {
 
   /** Answers a server-request. `rpcId` MUST be the one the host sent. */
   async respond(rpcId: RpcId, value: unknown, signal?: AbortSignal): Promise<RpcReceipt> {
-    const body: ClientResponse = {
-      type: 'client-response',
-      rpcId,
-      result: { ok: true, value },
-    }
+    return this.#respondResult(rpcId, { ok: true, value }, signal)
+  }
+
+  /**
+   * Sends a failed result for an answerable server-request. DSH uses the
+   * `cancelled` error code to abort an ask_user_question batch; this is still
+   * a successful `/api/respond` carrier operation when the host accepts it.
+   */
+  async respondError(rpcId: RpcId, error: RpcError, signal?: AbortSignal): Promise<RpcReceipt> {
+    return this.#respondResult(rpcId, { ok: false, error }, signal)
+  }
+
+  async #respondResult(
+    rpcId: RpcId,
+    result: ClientResponse['result'],
+    signal?: AbortSignal,
+  ): Promise<RpcReceipt> {
+    const body: ClientResponse = { type: 'client-response', rpcId, result }
     try {
       const response = await fetch(new URL(RESPOND_PATH, `${this.#baseUrl}/`), {
         method: 'POST',

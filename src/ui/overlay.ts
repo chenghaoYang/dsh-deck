@@ -5,8 +5,8 @@
  * graphics; this module never writes the terminal except through RenderTarget.
  *
  * One ask_user server-request is one batch — the overlay walks questions
- * sequentially but only the terminal `answered` result is sent back. Esc
- * discards the whole draft set.
+ * sequentially but only the terminal `answered` result is sent back. Esc/Ctrl+C
+ * cancel the whole batch through the host response path.
  */
 
 import type { Key } from '../term/input.ts'
@@ -15,6 +15,7 @@ import type {
   AskUserQuestionAnswer,
   AskUserQuestionAnswerItem,
   AskUserQuestionItem,
+  CommandDescriptor,
 } from '../protocol/contract.ts'
 import type { Glyphs, Theme } from './theme.ts'
 import type { Rect } from './layout.ts'
@@ -50,6 +51,12 @@ function centerBox(rect: Rect, width: number, height: number): Rect {
     width: w,
     height: h,
   }
+}
+
+/** Command suggestions belong next to the composer, not in the visual center. */
+function bottomBox(rect: Rect, width: number, height: number): Rect {
+  const box = centerBox(rect, width, height)
+  return { ...box, row: rect.row + Math.max(0, rect.height - box.height) }
 }
 
 function putGlyph(
@@ -381,7 +388,9 @@ export function reduceQuestionOverlay(
   state: QuestionOverlayState,
   key: Key,
 ): QuestionOverlayResult {
-  if (key.kind === 'escape') return { kind: 'cancelled' }
+  if (key.kind === 'escape' || (key.kind === 'ctrl' && key.char.toLowerCase() === 'c')) {
+    return { kind: 'cancelled' }
+  }
 
   const question = state.questions[state.index]
   if (question === undefined) {
@@ -489,6 +498,143 @@ export function renderQuestionOverlay(
 }
 
 // ---------------------------------------------------------------------------
+// Slash-command palette
+// ---------------------------------------------------------------------------
+
+export type DeckCommandAction =
+  | 'model'
+  | 'modes'
+  | 'sessions'
+  | 'clear'
+  | 'rename'
+  | 'new'
+  | 'fork'
+  | 'help'
+  | 'quit'
+
+export interface SlashCommandEntry extends CommandDescriptor {
+  /** Deck-local chrome action; absent entries execute through commands/execute. */
+  action?: DeckCommandAction
+}
+
+export interface CommandPaletteState {
+  commands: readonly SlashCommandEntry[]
+  filter: string
+  cursor: number
+}
+
+export type CommandPaletteResult =
+  | { kind: 'continue'; state: CommandPaletteState }
+  | { kind: 'run'; command: SlashCommandEntry }
+  | { kind: 'complete'; command: SlashCommandEntry }
+  | { kind: 'cancelled'; input: string }
+
+function commandName(command: SlashCommandEntry): string {
+  return command.name.replace(/^\/+/, '')
+}
+
+function matchingCommands(state: CommandPaletteState): SlashCommandEntry[] {
+  const prefix = state.filter.toLocaleLowerCase()
+  return state.commands.filter((command) => commandName(command).toLocaleLowerCase().startsWith(prefix))
+}
+
+export function createCommandPalette(
+  commands: readonly SlashCommandEntry[],
+  filter = '',
+): CommandPaletteState {
+  return { commands, filter, cursor: 0 }
+}
+
+export function reduceCommandPalette(
+  state: CommandPaletteState,
+  key: Key,
+): CommandPaletteResult {
+  if (key.kind === 'escape') return { kind: 'cancelled', input: `/${state.filter}` }
+  if (key.kind === 'backspace') {
+    if (state.filter.length === 0) return { kind: 'cancelled', input: '' }
+    return { kind: 'continue', state: { ...state, filter: popGrapheme(state.filter), cursor: 0 } }
+  }
+  if (key.kind === 'paste') {
+    const text = key.text.replace(/[\r\n]/g, '')
+    return { kind: 'continue', state: { ...state, filter: state.filter + text, cursor: 0 } }
+  }
+  if (isPrintableChar(key)) {
+    if (key.char === ' ') {
+      const command = matchingCommands(state)[clampIndex(state.cursor, matchingCommands(state).length)]
+      return command === undefined ? { kind: 'continue', state } : { kind: 'complete', command }
+    }
+    return { kind: 'continue', state: { ...state, filter: state.filter + key.char, cursor: 0 } }
+  }
+
+  const commands = matchingCommands(state)
+  if (key.kind === 'up') {
+    return { kind: 'continue', state: { ...state, cursor: clampIndex(state.cursor - 1, commands.length) } }
+  }
+  if (key.kind === 'down') {
+    return { kind: 'continue', state: { ...state, cursor: clampIndex(state.cursor + 1, commands.length) } }
+  }
+  if (key.kind === 'home') return { kind: 'continue', state: { ...state, cursor: 0 } }
+  if (key.kind === 'end') {
+    return { kind: 'continue', state: { ...state, cursor: clampIndex(commands.length - 1, commands.length) } }
+  }
+  const command = commands[clampIndex(state.cursor, commands.length)]
+  if (key.kind === 'tab') {
+    return command === undefined ? { kind: 'continue', state } : { kind: 'complete', command }
+  }
+  if (key.kind === 'enter') {
+    return command === undefined ? { kind: 'continue', state } : { kind: 'run', command }
+  }
+  return { kind: 'continue', state }
+}
+
+export function renderCommandPalette(
+  target: RenderTarget,
+  rect: Rect,
+  state: CommandPaletteState,
+  theme: Theme,
+  glyphs: Glyphs,
+): void {
+  if (rect.width <= 0 || rect.height <= 0) return
+  const commands = matchingCommands(state)
+  const boxW = Math.max(4, Math.min(rect.width, 76))
+  const shownRows = Math.min(commands.length, Math.max(1, Math.min(10, rect.height - 4)))
+  const desiredH = Math.min(rect.height, Math.max(5, shownRows + 4))
+  const panel = bottomBox(rect, boxW, desiredH)
+  const innerW = Math.max(1, panel.width - 2)
+  const bodyH = Math.max(0, panel.height - 3)
+  const cursor = clampIndex(state.cursor, commands.length)
+  const start = commands.length <= bodyH
+    ? 0
+    : Math.max(0, Math.min(cursor - Math.floor(bodyH / 2), commands.length - bodyH))
+  const body: OverlayLine[] = [{ spans: [{ text: truncate(`/${state.filter}`, innerW), style: theme.subtle }] }]
+  const listH = Math.max(0, bodyH - 1)
+  const visible = commands.slice(start, start + listH)
+  if (visible.length === 0 && listH > 0) {
+    body.push({ spans: [{ text: '  no matching commands', style: theme.dim }] })
+  }
+  for (let i = 0; i < visible.length; i++) {
+    const command = visible[i]
+    if (command === undefined) continue
+    const selected = start + i === cursor
+    const mark = selected ? `${glyphs.arrow} ` : '  '
+    const name = `/${commandName(command)}`
+    const prefix = `${mark}${name}`
+    const gap = 2
+    const descriptionBudget = Math.max(0, innerW - stringWidth(prefix) - gap)
+    const spans: Span[] = [
+      { text: mark, style: selected ? theme.accent : theme.dim },
+      { text: name, style: selected ? theme.selected : theme.text },
+    ]
+    if (descriptionBudget > 0) {
+      spans.push({ text: ' '.repeat(gap), style: '' })
+      spans.push({ text: truncate(command.description, descriptionBudget), style: theme.dim })
+    }
+    body.push({ spans })
+  }
+  paintPanel(target, rect, panel, theme, glyphs, 'commands', body, '↑↓ move · enter run · tab complete · esc')
+}
+
+// ---------------------------------------------------------------------------
 // Model picker
 // ---------------------------------------------------------------------------
 
@@ -499,6 +645,8 @@ export interface PickerModel {
   name?: string
   efforts?: readonly string[]
   defaultEffort?: string
+  /** The effort this session is currently using for this model, when known. */
+  currentEffort?: string
   current?: boolean
 }
 
@@ -584,6 +732,11 @@ function modelEfforts(model: PickerModel): readonly string[] {
 
 function defaultEffortIndex(model: PickerModel): number {
   const efforts = modelEfforts(model)
+  const current = model.currentEffort
+  if (current !== undefined) {
+    const i = efforts.indexOf(current)
+    if (i >= 0) return i
+  }
   const fallback = model.defaultEffort
   if (fallback !== undefined) {
     const i = efforts.indexOf(fallback)

@@ -35,6 +35,8 @@ export interface LayoutOptions {
   composerHeight?: number
   /** Hide the sidebar even on a wide viewport. */
   sidebarHidden?: boolean
+  /** Reading-column cap used when the single-session sidebar is hidden. */
+  contentMaxWidth?: number
 }
 
 export function computeLayout(columns: number, rows: number, options: LayoutOptions = {}): Layout {
@@ -51,7 +53,12 @@ export function computeLayout(columns: number, rows: number, options: LayoutOpti
     ? Math.max(MIN_SIDEBAR, Math.min(MAX_SIDEBAR, Math.round(columns * SIDEBAR_FRACTION)))
     : 0
 
-  const header: Rect = { row: 1, col: 1, width: columns, height: headerHeight }
+  const contentMaxWidth = Math.max(40, options.contentMaxWidth ?? 120)
+  const compactContent = options.sidebarHidden === true
+  const contentWidth = compactContent ? Math.min(columns, contentMaxWidth) : columns
+  const contentCol = compactContent ? 1 + Math.floor((columns - contentWidth) / 2) : 1
+
+  const header: Rect = { row: 1, col: contentCol, width: contentWidth, height: headerHeight }
   const bodyRow = headerHeight + 1
 
   const sidebar: Rect | undefined = showSidebar
@@ -60,17 +67,17 @@ export function computeLayout(columns: number, rows: number, options: LayoutOpti
 
   // The divider rule sits at sidebarWidth + 1; leaving a blank column after it
   // keeps transcript text from touching the rule.
-  const transcriptCol = showSidebar ? sidebarWidth + 3 : 1
+  const transcriptCol = showSidebar ? sidebarWidth + 3 : contentCol
   const transcript: Rect = {
     row: bodyRow,
     col: transcriptCol,
-    width: Math.max(1, columns - transcriptCol + 1),
+    width: showSidebar ? Math.max(1, columns - transcriptCol + 1) : contentWidth,
     height: bodyHeight,
   }
 
   const composerRow = bodyRow + bodyHeight + 1
-  const composer: Rect = { row: composerRow, col: 1, width: columns, height: composerHeight }
-  const footer: Rect = { row: rows, col: 1, width: columns, height: footerHeight }
+  const composer: Rect = { row: composerRow, col: contentCol, width: contentWidth, height: composerHeight }
+  const footer: Rect = { row: rows, col: contentCol, width: contentWidth, height: footerHeight }
 
   return { columns, rows, header, sidebar, transcript, composer, footer, narrow }
 }

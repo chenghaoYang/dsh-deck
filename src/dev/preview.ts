@@ -284,7 +284,7 @@ async function main(): Promise<void> {
   }
 
   const focused = sessions[0]
-  const layout = computeLayout(columns, rows, { composerHeight: 1 })
+  const layout = computeLayout(columns, rows, { composerHeight: 1, sidebarHidden: sessions.length <= 1 })
   const target = new GridTarget(columns, rows)
 
   renderHeader(target, {
@@ -318,11 +318,11 @@ async function main(): Promise<void> {
     expandTools: false,
   })
   renderTranscript(target, { rect: layout.transcript, lines, scrollOffset: 0, theme })
-  target.fill(layout.composer.row - 1, 1, columns, 1, glyphs.hline, theme.border)
+  target.fill(layout.composer.row - 1, layout.composer.col, layout.composer.width, 1, glyphs.hline, theme.border)
   renderComposer(target, {
     rect: layout.composer,
     draft: values.draft ?? '',
-    cursor: (values.draft ?? '').length,
+    cursor: [...(values.draft ?? '')].length,
     mode: 'queue',
     busy: focused?.running ?? false,
     theme,

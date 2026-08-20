@@ -117,22 +117,22 @@ describe('screenToPoint', () => {
     }
   })
 
-  it('matches renderTranscript when totalLines < height and treats top rows as padding', () => {
+  it('matches renderTranscript when totalLines < height and treats bottom rows as padding', () => {
     const lines = numberedLines(4)
     const painted = paintedRows(lines, 0)
     assert.equal(painted.size, 4)
 
-    const padEnd = rect.row + (rect.height - 4)
-    for (let row = rect.row; row < padEnd; row++) {
-      assert.equal(painted.has(row), false)
-      assert.equal(screenToPoint(rect, 0, lines.length, row, rect.col), undefined)
-      assert.equal(screenToPoint(rect, 2, lines.length, row, rect.col + 8), undefined)
-    }
     for (let i = 0; i < 4; i++) {
-      const row = padEnd + i
+      const row = rect.row + i
       assert.equal(painted.get(row), lineText(lines[i] ?? { spans: [] }))
       assert.deepEqual(screenToPoint(rect, 0, lines.length, row, rect.col), { line: i, column: 0 })
       assert.deepEqual(screenToPoint(rect, 99, lines.length, row, rect.col + 7), { line: i, column: 7 })
+    }
+    const padStart = rect.row + 4
+    for (let row = padStart; row < rect.row + rect.height; row++) {
+      assert.equal(painted.has(row), false)
+      assert.equal(screenToPoint(rect, 0, lines.length, row, rect.col), undefined)
+      assert.equal(screenToPoint(rect, 2, lines.length, row, rect.col + 8), undefined)
     }
   })
 

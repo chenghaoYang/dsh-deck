@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { Readable } from 'node:stream'
 import { afterEach, describe, it } from 'node:test'
-import { beginSync, cursorTo, endSync, restoreTerminal } from '../src/term/ansi.ts'
+import { beginSync, cursorTo, endSync, hideCursor, restoreTerminal, showCursor } from '../src/term/ansi.ts'
 import type { TerminalCapabilities } from '../src/term/capabilities.ts'
 import { InputReader, type Key } from '../src/term/input.ts'
 import { Screen } from '../src/term/screen.ts'
@@ -163,13 +163,39 @@ describe('screen', () => {
     assert.equal(dump(), '')
   })
 
-  it('hooks exit, SIGINT, SIGTERM, and uncaughtException, and unhooks on close', () => {
+  it('positions the application caret after every frame and toggles visibility', () => {
+    const out = fakeOut()
+    const screen = new Screen(out.stream, caps())
+    openScreens.push(screen)
+    screen.open()
+    out.clear()
+
+    screen.showCursorAt(3, 5)
+    assert.equal(out.output, cursorTo(3, 5) + showCursor())
+    out.clear()
+    screen.showCursorAt(3, 5)
+    assert.equal(out.output, cursorTo(3, 5))
+
+    out.clear()
+    screen.hideCursor()
+    assert.equal(out.output, hideCursor())
+    out.clear()
+    screen.showCursorAt(3, 5)
+    assert.equal(out.output, cursorTo(3, 5) + showCursor())
+
+    out.clear()
+    screen.close()
+    assert.ok(out.output.includes(showCursor()))
+  })
+
+  it('hooks exit, SIGINT, SIGTERM, SIGHUP, and uncaughtException, and unhooks on close', () => {
     const out = fakeOut()
     const screen = new Screen(out.stream, caps())
     const before = {
       exit: process.listeners('exit').length,
       SIGINT: process.listeners('SIGINT').length,
       SIGTERM: process.listeners('SIGTERM').length,
+      SIGHUP: process.listeners('SIGHUP').length,
       uncaughtException: process.listeners('uncaughtException').length,
       uncaughtExceptionMonitor: process.listeners('uncaughtExceptionMonitor').length,
     }
@@ -177,6 +203,7 @@ describe('screen', () => {
     assert.equal(process.listeners('exit').length, before.exit + 1)
     assert.equal(process.listeners('SIGINT').length, before.SIGINT + 1)
     assert.equal(process.listeners('SIGTERM').length, before.SIGTERM + 1)
+    assert.equal(process.listeners('SIGHUP').length, before.SIGHUP + 1)
     assert.equal(process.listeners('uncaughtException').length, before.uncaughtException + 1)
     assert.equal(
       process.listeners('uncaughtExceptionMonitor').length,
@@ -186,6 +213,7 @@ describe('screen', () => {
     assert.equal(process.listeners('exit').length, before.exit)
     assert.equal(process.listeners('SIGINT').length, before.SIGINT)
     assert.equal(process.listeners('SIGTERM').length, before.SIGTERM)
+    assert.equal(process.listeners('SIGHUP').length, before.SIGHUP)
     assert.equal(process.listeners('uncaughtException').length, before.uncaughtException)
     assert.equal(
       process.listeners('uncaughtExceptionMonitor').length,

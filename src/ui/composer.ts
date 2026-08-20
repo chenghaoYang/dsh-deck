@@ -1,6 +1,6 @@
 /**
- * Draft editor. Caret column is stringWidth of the code-point prefix on the
- * wrapped line that contains the caret — CJK must not be counted as 1.
+ * Draft editor. Caret column is measured on the full draft's wrapped layout —
+ * wrapping the prefix alone can choose a different word boundary.
  */
 
 import { stringWidth } from '../term/width.ts'
@@ -26,6 +26,9 @@ export interface ComposerProps {
   glyphs: Glyphs
 }
 
+/** Zero-width, non-space marker used only to locate the caret after wrapping. */
+const CARET_MARK = '\u2060'
+
 /** Returns the absolute cursor position the shell should park the terminal caret at. */
 export function renderComposer(target: RenderTarget, props: ComposerProps): { row: number; col: number } {
   const { rect, draft, busy, theme } = props
@@ -44,9 +47,12 @@ export function renderComposer(target: RenderTarget, props: ComposerProps): { ro
   const lines = wrapLines(draft, wrapWidth)
   const cur = Math.max(0, Math.min(props.cursor, codePointLength(draft)))
   const prefix = codePointSlice(draft, 0, cur)
-  const prefixLines = prefix.length === 0 ? [''] : wrapLines(prefix, wrapWidth)
-  const caretLine = Math.max(0, prefixLines.length - 1)
-  const caretOff = stringWidth(prefixLines[caretLine] ?? '')
+  const suffix = codePointSlice(draft, cur)
+  const markedLines = wrapLines(prefix + CARET_MARK + suffix, wrapWidth)
+  const markedLine = Math.max(0, markedLines.findIndex((line) => line.includes(CARET_MARK)))
+  const caretLineText = markedLines[markedLine] ?? CARET_MARK
+  const caretLine = markedLine
+  const caretOff = stringWidth(caretLineText.slice(0, caretLineText.indexOf(CARET_MARK)))
 
   const maxStart = Math.max(0, lines.length - rect.height)
   let start = maxStart

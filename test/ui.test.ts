@@ -127,6 +127,7 @@ function session(id: string, extra: {
   running?: boolean
   origin?: 'subagent'
   parentSessionId?: string
+  pendingApprovals?: PendingApproval[]
   pendingApproval?: PendingApproval
   unread?: number
   lastError?: string
@@ -148,6 +149,7 @@ function session(id: string, extra: {
   if (extra.cwd !== undefined) row.cwd = extra.cwd
   if (extra.origin !== undefined) row.origin = extra.origin
   if (extra.parentSessionId !== undefined) row.parentSessionId = extra.parentSessionId
+  if (extra.pendingApprovals !== undefined) row.pendingApprovals = extra.pendingApprovals
   if (extra.pendingApproval !== undefined) row.pendingApproval = extra.pendingApproval
   if (extra.lastError !== undefined) row.lastError = extra.lastError
   return row
@@ -412,6 +414,24 @@ describe('widget bounds', () => {
   }
 })
 
+describe('single-session wide layout', () => {
+  it('centers a readable 120-column surface in a 185-column Ghostty window', () => {
+    const layout = computeLayout(185, 46, { sidebarHidden: true })
+    assert.equal(layout.sidebar, undefined)
+    for (const rect of [layout.header, layout.transcript, layout.composer, layout.footer]) {
+      assert.equal(rect.col, 33)
+      assert.equal(rect.width, 120)
+    }
+  })
+
+  it('keeps the multi-session cockpit sidebar and full main pane', () => {
+    const layout = computeLayout(185, 46)
+    assert.equal(layout.sidebar?.width, 34)
+    assert.equal(layout.transcript.col, 37)
+    assert.equal(layout.transcript.width, 149)
+  })
+})
+
 describe('layoutTranscript', () => {
   it('never exceeds width and never splits a wide character, including CJK', () => {
     const width = 21
@@ -616,6 +636,22 @@ describe('sidebar', () => {
     )
     assert.ok(target.plain().includes('中文后台任务') || target.plain().includes('中文'))
   })
+
+  it('shows the number of queued approvals beside the session', () => {
+    const first = approval('bash')
+    const second = { ...approval('editor'), rpcId: 'rpc-2', approvalId: 'apr-2' }
+    const rect: Rect = { row: 2, col: 1, width: 32, height: 4 }
+    const target = new BoundsTarget(rect)
+    renderSidebar(target, {
+      rect,
+      sessions: [session('queued', { pendingApprovals: [first, second] })],
+      focusedId: 'queued',
+      theme,
+      glyphs,
+      spinnerFrame: 0,
+    })
+    assert.ok(target.plain().includes('2'), `expected pending count in ${JSON.stringify(target.puts)}`)
+  })
 })
 
 describe('composer', () => {
@@ -636,6 +672,22 @@ describe('composer', () => {
     assert.equal(pos.row, rect.row)
     assert.equal(pos.col, rect.col + stringWidth('中文'))
     assert.equal(stringWidth('中文'), 4)
+  })
+
+  it('locates the caret from the full word-wrapped draft', () => {
+    const rect: Rect = { row: 8, col: 3, width: 10, height: 3 }
+    const target = new BoundsTarget(rect)
+    const pos = renderComposer(target, {
+      rect,
+      draft: '123456789 a',
+      cursor: 10,
+      mode: 'queue',
+      busy: false,
+      theme,
+      glyphs,
+    })
+    assert.equal(pos.row, rect.row + 1)
+    assert.equal(pos.col, rect.col)
   })
 
   it('shows queue/steer in accent when busy and send when idle', () => {

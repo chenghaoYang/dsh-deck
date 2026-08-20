@@ -256,4 +256,32 @@ describe('DeckClient.respond', () => {
     assert.deepEqual(await client.respond('r1', {}), { accepted: false, reason: 'not-pending' })
     assert.deepEqual(await client.respond('r2', {}), { accepted: false, reason: 'bad-response' })
   })
+
+  it('can send a failed result for a cancelled question', async () => {
+    const captured: Captured[] = []
+    const { url, close } = await listen(async (req, res) => {
+      captured.push({ method: req.method ?? '', url: req.url ?? '', body: await readJson(req) })
+      json(res, 200, { accepted: true })
+    })
+    after(() => close())
+
+    const client = new DeckClient({ baseUrl: url })
+    const receipt = await client.respondError('question-rpc-1', {
+      code: 'cancelled',
+      message: 'the user cancelled ask_user_question',
+      details: {},
+    })
+    assert.deepEqual(receipt, { accepted: true })
+    const req = captured[0]
+    assert.ok(req)
+    assert.ok(isRecord(req.body))
+    assert.deepEqual(req.body.result, {
+      ok: false,
+      error: {
+        code: 'cancelled',
+        message: 'the user cancelled ask_user_question',
+        details: {},
+      },
+    })
+  })
 })

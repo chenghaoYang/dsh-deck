@@ -133,7 +133,9 @@ interface SpawnedHost {
   logPath: string
 }
 
-async function startHost(port: number, cwd: string): Promise<SpawnedHost> {
+type HostStopRegistrar = (stop: () => void) => void
+
+async function startHost(port: number, cwd: string, registerStop?: HostStopRegistrar): Promise<SpawnedHost> {
   const logPath = join(tmpdir(), `deck-dsh-${String(port)}.log`)
   const log = createWriteStream(logPath, { flags: 'a' })
   const child = spawn('dsh', ['web', '--no-open', '--port', String(port)], {
@@ -155,6 +157,11 @@ async function startHost(port: number, cwd: string): Promise<SpawnedHost> {
     exitInfo = error.message
   })
 
+  const stop = (): void => {
+    if (!exited) child.kill('SIGTERM')
+  }
+  registerStop?.(stop)
+
   const baseUrl = `http://127.0.0.1:${String(port)}`
   const deadline = Date.now() + HOST_START_TIMEOUT_MS
   while (Date.now() < deadline) {
@@ -162,9 +169,7 @@ async function startHost(port: number, cwd: string): Promise<SpawnedHost> {
     if (await probeHost(baseUrl, 1500)) {
       return {
         logPath,
-        stop: () => {
-          if (!exited) child.kill('SIGTERM')
-        },
+        stop,
       }
     }
     await new Promise((resolve) => setTimeout(resolve, PROBE_INTERVAL_MS))
@@ -180,39 +185,62 @@ async function main(): Promise<void> {
 
   const baseUrl = args.attach ?? `http://127.0.0.1:${String(args.port)}`
   let spawned: SpawnedHost | undefined
-
-  if (!(await probeHost(baseUrl))) {
-    if (args.attach !== undefined) {
-      process.stderr.write(`deck: no dsh host answering at ${baseUrl}\n`)
-      process.exitCode = 1
-      return
+  let appStarted = false
+  let stopSpawnedHost: (() => void) | undefined
+  const signalExitCodes: Record<'SIGINT' | 'SIGTERM' | 'SIGHUP', number> = {
+    SIGINT: 130,
+    SIGTERM: 143,
+    SIGHUP: 129,
+  }
+  const signalHandlers: [NodeJS.Signals, () => void][] = []
+  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
+    const handler = (): void => {
+      stopSpawnedHost?.()
+      // Before DeckApp opens the terminal, there is no Screen signal handler to
+      // finish termination. Stop the child first, then exit ourselves.
+      if (!appStarted) process.exit(signalExitCodes[signal])
     }
-    if (!args.spawnHost) {
-      process.stderr.write(`deck: no dsh host at ${baseUrl} and --no-spawn was given\n`)
-      process.exitCode = 1
-      return
-    }
-    process.stdout.write(`deck: starting a dsh host on port ${String(args.port)}…\n`)
-    try {
-      spawned = await startHost(args.port, args.cwd)
-    } catch (error) {
-      process.stderr.write(`deck: ${error instanceof Error ? error.message : String(error)}\n`)
-      process.stderr.write('deck: is `dsh` installed? try `npm i -g @deepseek-ai/dsh`\n')
-      process.exitCode = 1
-      return
-    }
+    signalHandlers.push([signal, handler])
+    // Register before DeckApp so the host is stopped before Screen exits on a
+    // signal. SIGHUP is handled by Screen too once the app owns the terminal.
+    process.prependListener(signal, handler)
   }
 
-  const app = new DeckApp({
-    baseUrl,
-    cwd: args.cwd,
-    printOnExit: args.printOnExit,
-  })
-
   try {
+    if (!(await probeHost(baseUrl))) {
+      if (args.attach !== undefined) {
+        process.stderr.write(`deck: no dsh host answering at ${baseUrl}\n`)
+        process.exitCode = 1
+        return
+      }
+      if (!args.spawnHost) {
+        process.stderr.write(`deck: no dsh host at ${baseUrl} and --no-spawn was given\n`)
+        process.exitCode = 1
+        return
+      }
+      process.stdout.write(`deck: starting a dsh host on port ${String(args.port)}…\n`)
+      try {
+        spawned = await startHost(args.port, args.cwd, (stop) => { stopSpawnedHost = stop })
+      } catch (error) {
+        process.stderr.write(`deck: ${error instanceof Error ? error.message : String(error)}\n`)
+        process.stderr.write('deck: is `dsh` installed? try `npm i -g @deepseek-ai/dsh`\n')
+        process.exitCode = 1
+        return
+      }
+    }
+
+    const app = new DeckApp({
+      baseUrl,
+      cwd: args.cwd,
+      printOnExit: args.printOnExit,
+    })
+
+    appStarted = true
     await app.start()
   } finally {
     spawned?.stop()
+    stopSpawnedHost?.()
+    for (const [signal, handler] of signalHandlers) process.removeListener(signal, handler)
   }
 }
 

@@ -22,6 +22,11 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      # Exercise the artifact users actually install: the bin shim must find
+      # compiled JS in a clean package, not only in this checkout.
+      - run: npm pack --silent
+      - run: npm install -g ./dsh-deck-*.tgz
+      - run: deck --version
       # The e2e boots a real `dsh web` host against the bundled fake model
       # server inside a throwaway DSH_HOME, so it needs the harness CLI but no
       # API key. rc versions ride the `next` tag.

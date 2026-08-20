@@ -309,6 +309,73 @@ describe('approvals, host frames, reset', () => {
     assert.equal(after.call.status, 'running')
   })
 
+  it('queues parallel approvals and resolves only the matching approval', async () => {
+    const store = new DeckStore()
+    store.applyMux({
+      type: 'session/event',
+      sessionId: 's',
+      event: ev(0, 'tool/call', { turn: 1, step: 1, callId: 'c1', name: 'bash', arguments: '{}' }),
+    }, 'event-1')
+    store.applyMux({
+      type: 'session/event',
+      sessionId: 's',
+      event: ev(1, 'tool/call', { turn: 1, step: 1, callId: 'c2', name: 'bash', arguments: '{}' }),
+    }, 'event-2')
+    store.applyMux({
+      type: 'approval/requested',
+      sessionId: 's',
+      approvalId: 'ap1',
+      toolName: 'bash',
+      callId: 'c1',
+    }, 'rpc-1')
+    store.applyMux({
+      type: 'approval/requested',
+      sessionId: 's',
+      approvalId: 'ap2',
+      toolName: 'bash',
+      callId: 'c2',
+    }, 'rpc-2')
+    await flush()
+
+    const queued = store.get('s')?.pendingApprovals ?? []
+    assert.deepEqual(queued.map((item) => item.approvalId), ['ap1', 'ap2'])
+    assert.equal(store.get('s')?.pendingApproval?.approvalId, 'ap1')
+
+    store.applyMux({
+      type: 'approval/resolved',
+      sessionId: 's',
+      approvalId: 'unknown',
+      outcome: 'rejected',
+    }, 'rpc-unknown')
+    await flush()
+    assert.deepEqual((store.get('s')?.pendingApprovals ?? []).map((item) => item.approvalId), ['ap1', 'ap2'])
+
+    store.applyMux({
+      type: 'approval/resolved',
+      sessionId: 's',
+      approvalId: 'ap2',
+      outcome: 'allowed-once',
+    }, 'rpc-2-done')
+    await flush()
+    assert.deepEqual((store.get('s')?.pendingApprovals ?? []).map((item) => item.approvalId), ['ap1'])
+    assert.equal(store.get('s')?.pendingApproval?.approvalId, 'ap1')
+    const secondTool = store.get('s')?.transcript.items.find(
+      (item) => item.kind === 'tool' && item.call.callId === 'c2',
+    )
+    assert.ok(secondTool?.kind === 'tool')
+    assert.equal(secondTool.call.status, 'running')
+
+    store.applyMux({
+      type: 'approval/resolved',
+      sessionId: 's',
+      approvalId: 'ap1',
+      outcome: 'rejected',
+    }, 'rpc-1-done')
+    await flush()
+    assert.deepEqual(store.get('s')?.pendingApprovals, [])
+    assert.equal(store.get('s')?.pendingApproval, undefined)
+  })
+
   it('applies host status, errors, and removal', async () => {
     const store = new DeckStore()
     const added: HostFrame = { type: 'host/session-added', sessionId: 's', blank: false }
@@ -426,6 +493,36 @@ describe('ask-user questions', () => {
     assert.equal(store.get('beta')?.pendingQuestion, undefined)
     assert.ok(events.some((event) => event.kind === 'question' && event.sessionId === 'beta'))
     stop()
+  })
+
+  it('queues parallel question batches and resolves only the matching rpcId', async () => {
+    const store = new DeckStore()
+    store.applyMux({ type: 'question/requested', sessionId: 's', questions }, 'rpc-q1')
+    store.applyMux({ type: 'question/requested', sessionId: 's', questions }, 'rpc-q2')
+    await flush()
+
+    assert.deepEqual((store.get('s')?.pendingQuestions ?? []).map((item) => item.rpcId), ['rpc-q1', 'rpc-q2'])
+    assert.equal(store.get('s')?.pendingQuestion?.rpcId, 'rpc-q1')
+
+    store.applyMux({
+      type: 'question/resolved',
+      sessionId: 's',
+      questionRpcId: 'rpc-q2',
+      outcome: 'answered',
+    }, 'rpc-q2-done')
+    await flush()
+    assert.deepEqual((store.get('s')?.pendingQuestions ?? []).map((item) => item.rpcId), ['rpc-q1'])
+    assert.equal(store.get('s')?.pendingQuestion?.rpcId, 'rpc-q1')
+
+    store.applyMux({
+      type: 'question/resolved',
+      sessionId: 's',
+      questionRpcId: 'rpc-q1',
+      outcome: 'cancelled',
+    }, 'rpc-q1-done')
+    await flush()
+    assert.deepEqual(store.get('s')?.pendingQuestions, [])
+    assert.equal(store.get('s')?.pendingQuestion, undefined)
   })
 
   it('preserves pendingQuestion across applySessionList and clears it on resetLiveState', async () => {

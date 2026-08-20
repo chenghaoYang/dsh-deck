@@ -11,13 +11,18 @@
 
 import { DeckClient } from '../protocol/client.ts'
 import { Connection, type ConnectionState } from '../protocol/connection.ts'
-import { DeckStore, type SessionState } from '../model/store.ts'
+import {
+  DeckStore,
+  pendingApprovalsOf,
+  pendingQuestionsOf,
+  type SessionState,
+} from '../model/store.ts'
 import type { HostDescription, SessionId } from '../protocol/contract.ts'
 import { detectCapabilities, type TerminalCapabilities } from '../term/capabilities.ts'
 import { Screen } from '../term/screen.ts'
 import { InputReader, type Key } from '../term/input.ts'
 import { TerminalIntegration } from '../term/ghostty.ts'
-import { stringWidth } from '../term/width.ts'
+import { graphemes, stringWidth } from '../term/width.ts'
 import { createGlyphs, createTheme, type Glyphs, type Theme } from './theme.ts'
 import { computeLayout, viewportTooSmall, type Layout } from './layout.ts'
 import { layoutTranscript, renderTranscript, type RenderedLine } from './transcript.ts'
@@ -36,18 +41,24 @@ import {
   type ModesState,
 } from './modes.ts'
 import {
+  createCommandPalette,
   createPickerOverlay,
   createQuestionOverlay,
   layoutImageOverlay,
+  reduceCommandPalette,
   reducePickerOverlay,
   reduceQuestionOverlay,
+  renderCommandPalette,
   renderImageOverlayChrome,
   renderPickerOverlay,
   renderQuestionOverlay,
+  type CommandPaletteState,
+  type DeckCommandAction,
   type ImageOverlayLayout,
   type PickerModel,
   type PickerOverlayState,
   type QuestionOverlayState,
+  type SlashCommandEntry,
 } from './overlay.ts'
 import {
   createSwitcher,
@@ -69,7 +80,7 @@ import {
   type Selection,
 } from './selection.ts'
 import { sidebarHitTest } from './sidebar.ts'
-import type { AgentPresetEntry, AskUserQuestionAnswer, RpcId } from '../protocol/contract.ts'
+import type { AgentPresetEntry, AskUserQuestionAnswer, CommandDescriptor, RpcId } from '../protocol/contract.ts'
 import { cursorTo, sgr } from '../term/ansi.ts'
 import { appendFileSync } from 'node:fs'
 import { spawn } from 'node:child_process'
@@ -88,14 +99,18 @@ const KEY_HINTS = [
   { key: '^g', label: 'help' },
 ]
 
-const APPROVAL_HINTS = [
-  { key: 'a', label: 'allow' },
-  { key: 'r', label: 'reject' },
-]
+function approvalHints(count: number): readonly { key: string; label: string }[] {
+  const more = count > 1 ? ` · ${String(count - 1)} more pending` : ''
+  return [
+    { key: 'a', label: `allow${more}` },
+    { key: 'r', label: 'reject' },
+  ]
+}
 
-const QUESTION_HINTS = [
-  { key: '⏎', label: 'answer the question' },
-]
+function questionHints(count: number): readonly { key: string; label: string }[] {
+  const more = count > 1 ? ` · ${String(count - 1)} more pending` : ''
+  return [{ key: '⏎', label: `answer the question${more}` }]
+}
 
 /** One modal at a time; while it exists it owns the keyboard. */
 type Overlay =
@@ -104,6 +119,25 @@ type Overlay =
   | { kind: 'image'; alt: string; data: Uint8Array; transmitted: boolean; layout?: ImageOverlayLayout }
   | { kind: 'switcher'; state: SwitcherState }
   | { kind: 'modes'; sessionId: SessionId; state: ModesState }
+  | { kind: 'commands'; sessionId: SessionId; state: CommandPaletteState }
+
+const DECK_COMMANDS: readonly SlashCommandEntry[] = [
+  { name: 'model', description: 'Switch model and reasoning effort', action: 'model' },
+  { name: 'effort', description: 'Adjust reasoning effort', action: 'model' },
+  { name: 'modes', description: 'Model, preset, permission, plan, and compact', action: 'modes' },
+  { name: 'preset', description: 'Switch the agent preset', action: 'modes' },
+  { name: 'permissions', description: 'Inspect or switch permission mode', action: 'modes' },
+  { name: 'sessions', description: 'Search and switch sessions', action: 'sessions' },
+  { name: 'resume', description: 'Resume an existing session', action: 'sessions' },
+  { name: 'clear', description: 'Clear the visible transcript', action: 'clear' },
+  { name: 'rename', description: 'Rename the focused session', input: { hint: '<title>' }, action: 'rename' },
+  { name: 'new', description: 'Start a new session', action: 'new' },
+  { name: 'fork', description: 'Fork the focused session', action: 'fork' },
+  { name: 'help', description: 'Show shortcuts and command help', action: 'help' },
+  { name: 'exit', description: 'Exit Deck', action: 'quit' },
+  { name: 'quit', description: 'Exit Deck', action: 'quit' },
+  { name: 'q', description: 'Exit Deck', action: 'quit' },
+]
 
 function inRect(rect: { row: number; col: number; width: number; height: number }, row: number, col: number): boolean {
   return row >= rect.row && row < rect.row + rect.height && col >= rect.col && col < rect.col + rect.width
@@ -167,6 +201,9 @@ export class DeckApp {
   private connectionState: ConnectionState = 'connecting'
   private draft = ''
   private cursor = 0
+  /** Changes to draft or caret while a prompt RPC is in flight. */
+  private draftRevision = 0
+  private slashOpenInFlight = false
   private scrollOffset = 0
   private spinnerFrame = 0
   private showHelp = false
@@ -287,13 +324,23 @@ export class DeckApp {
     if (kind === 'approval') {
       const pending = this.store.sessions.find((s) => s.pendingApproval !== undefined)
       if (pending !== undefined) {
-        this.term.notify('Approval needed', `${pending.pendingApproval?.toolName ?? 'tool'} in ${this.titleOf(pending)}`)
+        // Approval is the only interaction that preempts other chrome. Preserve
+        // a half-typed slash filter so the user can resume it afterwards.
+        if (this.overlay?.kind === 'commands') this.replaceDraft(`/${this.overlay.state.filter}`)
+        if (this.overlay?.kind === 'image') this.term.clearImages()
+        this.overlay = undefined
+        this.showHelp = false
+        const count = pendingApprovalsOf(pending).length
+        const suffix = count > 1 ? ` · ${String(count)} pending` : ''
+        this.term.notify('Approval needed', `${pending.pendingApproval?.toolName ?? 'tool'} in ${this.titleOf(pending)}${suffix}`)
       }
     }
     if (kind === 'question') {
       const pending = this.store.sessions.find((s) => s.pendingQuestion !== undefined)
       if (pending !== undefined) {
-        this.term.notify('Question from agent', this.titleOf(pending))
+        const count = pendingQuestionsOf(pending).length
+        const suffix = count > 1 ? ` · ${String(count)} pending` : ''
+        this.term.notify('Question from agent', `${this.titleOf(pending)}${suffix}`)
         this.maybeOpenQuestion()
       }
     }
@@ -308,7 +355,7 @@ export class DeckApp {
   private maybeOpenQuestion(): void {
     if (this.overlay !== undefined) return
     const focused = this.focused()
-    const pending = focused?.pendingQuestion
+    const pending = focused === undefined ? undefined : pendingQuestionsOf(focused)[0]
     if (focused === undefined || pending === undefined) return
     this.overlay = {
       kind: 'question',
@@ -383,14 +430,33 @@ export class DeckApp {
       case 'enter': void this.send('queue'); return
       case 'tab': this.cycleFocus(1); return
       case 'backspace': this.backspace(); return
-      case 'left': this.cursor = Math.max(0, this.cursor - 1); this.requestFrame(); return
-      case 'right': this.cursor = Math.min([...this.draft].length, this.cursor + 1); this.requestFrame(); return
+      case 'left': {
+        const next = previousGraphemeBoundary(this.draft, this.cursor)
+        if (next !== this.cursor) { this.cursor = next; this.draftRevision += 1 }
+        this.requestFrame()
+        return
+      }
+      case 'right': {
+        const next = nextGraphemeBoundary(this.draft, this.cursor)
+        if (next !== this.cursor) { this.cursor = next; this.draftRevision += 1 }
+        this.requestFrame()
+        return
+      }
       case 'up': this.scroll(1); return
       case 'down': this.scroll(-1); return
       case 'pageup': this.scroll(this.visibleTranscriptRows()); return
       case 'pagedown': this.scroll(-this.visibleTranscriptRows()); return
-      case 'home': this.cursor = 0; this.requestFrame(); return
-      case 'end': this.cursor = [...this.draft].length; this.requestFrame(); return
+      case 'home': {
+        if (this.cursor !== 0) { this.cursor = 0; this.draftRevision += 1 }
+        this.requestFrame()
+        return
+      }
+      case 'end': {
+        const end = codePointLength(this.draft)
+        if (this.cursor !== end) { this.cursor = end; this.draftRevision += 1 }
+        this.requestFrame()
+        return
+      }
       case 'escape': this.showHelp = false; this.requestFrame(); return
       default: return
     }
@@ -412,8 +478,20 @@ export class DeckApp {
       case 'y': this.copyLastAssistant(); return
       case 'e': this.expandTools = !this.expandTools; this.requestFrame(); return
       case 'g': this.showHelp = !this.showHelp; this.requestFrame(); return
-      case 'u': this.draft = ''; this.cursor = 0; this.requestFrame(); return
-      case 'a': this.cursor = 0; this.requestFrame(); return
+      case 'u': {
+        if (this.draft !== '' || this.cursor !== 0) {
+          this.draft = ''
+          this.cursor = 0
+          this.draftRevision += 1
+        }
+        this.requestFrame()
+        return
+      }
+      case 'a': {
+        if (this.cursor !== 0) { this.cursor = 0; this.draftRevision += 1 }
+        this.requestFrame()
+        return
+      }
       case 'w': this.deleteWord(); return
       case 'l': this.scrollOffset = 0; this.requestFrame(); return
       case 'p': void this.openPicker(); return
@@ -557,22 +635,26 @@ export class DeckApp {
    * uses. Two failure layers: the RPC can fail, and a command that ran can
    * still answer `kind: 'error'`. An absent value means no command matched.
    */
-  private async runCommand(sessionId: SessionId, line: string): Promise<void> {
+  private async runCommand(sessionId: SessionId, line: string): Promise<boolean> {
     const result = await this.client.call('commands/execute', {
       args: { agentId: sessionId, line, images: [] },
     })
     if (!result.ok) {
       this.notice(`${line}: ${result.error.message}`, 'error')
-      return
+      return false
     }
     const execution = result.value
     if (execution === undefined) {
       this.notice(`${line}: this host has no such command`, 'warn')
-      return
+      return false
     }
     const outcome = execution.result
-    if (outcome.kind === 'error') this.notice(outcome.text, 'error')
-    else if (outcome.text !== undefined && outcome.text !== '') this.notice(outcome.text, 'info')
+    if (outcome.kind === 'error') {
+      this.notice(outcome.text, 'error')
+      return false
+    }
+    if (outcome.text !== undefined && outcome.text !== '') this.notice(outcome.text, 'info')
+    return true
   }
 
   private async archiveSession(id: SessionId): Promise<void> {
@@ -732,6 +814,24 @@ export class DeckApp {
   // -- overlays --------------------------------------------------------------
 
   private onOverlayKey(overlay: Overlay, key: Key): void {
+    if (overlay.kind === 'commands') {
+      const result = reduceCommandPalette(overlay.state, key)
+      if (result.kind === 'continue') {
+        this.overlay = { ...overlay, state: result.state }
+      } else if (result.kind === 'cancelled') {
+        this.overlay = undefined
+        this.replaceDraft(result.input)
+      } else if (result.kind === 'complete') {
+        this.overlay = undefined
+        this.replaceDraft(`/${normalizedCommandName(result.command.name)} `)
+      } else {
+        this.overlay = undefined
+        this.replaceDraft('')
+        this.runSlashEntry(overlay.sessionId, result.command)
+      }
+      this.requestFrame()
+      return
+    }
     if (overlay.kind === 'modes') {
       const result = reduceModes(overlay.state, key)
       switch (result.kind) {
@@ -777,9 +877,11 @@ export class DeckApp {
         this.overlay = undefined
         void this.respondQuestion(overlay.sessionId, overlay.rpcId, result.answer)
       } else {
-        // The question stays pending on the host; enter reopens the card.
+        // Keep the store pending until the host emits question/resolved. That
+        // frame promotes the next queued batch, if any, and is the source of
+        // truth for whether cancellation actually took effect.
         this.overlay = undefined
-        this.notice('question left unanswered — press enter to reopen', 'warn')
+        void this.cancelQuestion(overlay.rpcId)
       }
       this.requestFrame()
       return
@@ -816,6 +918,22 @@ export class DeckApp {
     else this.notice('answered', 'info')
   }
 
+  private async cancelQuestion(rpcId: RpcId): Promise<void> {
+    const receipt = await this.client.respondError(rpcId, {
+      code: 'cancelled',
+      message: 'the user cancelled ask_user_question',
+      details: {},
+    })
+    if (!receipt.accepted) {
+      this.notice(`question cancellation not accepted: ${receipt.reason}`, 'warn')
+      // The host did not accept the cancellation, so leave the pending card
+      // answerable instead of making the user hunt for it in the sidebar.
+      this.maybeOpenQuestion()
+      return
+    }
+    this.notice('question cancelled', 'info')
+  }
+
   private async openPicker(): Promise<void> {
     const focused = this.focused()
     if (focused === undefined || this.overlay !== undefined) return
@@ -824,6 +942,8 @@ export class DeckApp {
       this.notice(`models unavailable: ${result.error.message}`, 'error')
       return
     }
+    const current = currentModelOf(result.value)
+    if (current !== undefined) this.store.applyModelSelection(focused.id, current)
     const models = mapModelCatalog(result.value)
     if (models.length === 0) {
       this.notice('the host advertises no models', 'warn')
@@ -831,6 +951,69 @@ export class DeckApp {
     }
     this.overlay = { kind: 'picker', sessionId: focused.id, state: createPickerOverlay(models) }
     this.requestFrame()
+  }
+
+  /** Merge Deck chrome actions with the live host registry when `/` is typed. */
+  private async maybeOpenCommandPalette(): Promise<void> {
+    if (this.slashOpenInFlight || this.overlay !== undefined) return
+    if (!this.draft.startsWith('/') || /\s/u.test(this.draft)) return
+    const focused = this.focused()
+    if (focused === undefined) return
+    this.slashOpenInFlight = true
+    const result = await this.client.call('commands/list', { args: { agentId: focused.id } })
+    this.slashOpenInFlight = false
+    if (this.overlay !== undefined || this.store.focusedId !== focused.id) return
+    if (!this.draft.startsWith('/') || /\s/u.test(this.draft)) return
+    const filter = this.draft.slice(1)
+    const hostCommands = result.ok ? result.value : []
+    if (!result.ok) this.notice(`host commands unavailable: ${result.error.message}`, 'warn')
+    this.replaceDraft('')
+    this.overlay = {
+      kind: 'commands',
+      sessionId: focused.id,
+      state: createCommandPalette(mergeCommandCatalog(DECK_COMMANDS, hostCommands), filter),
+    }
+    this.requestFrame()
+  }
+
+  private runSlashEntry(sessionId: SessionId, command: SlashCommandEntry): void {
+    if (command.input !== undefined) {
+      this.replaceDraft(`/${normalizedCommandName(command.name)} `)
+      this.requestFrame()
+      return
+    }
+    const action = command.action
+    if (action !== undefined) {
+      this.runDeckCommand(action)
+      return
+    }
+    void this.runCommand(sessionId, `/${normalizedCommandName(command.name)}`)
+  }
+
+  private runDeckCommand(action: DeckCommandAction, input = ''): void {
+    switch (action) {
+      case 'model': void this.openPicker(); return
+      case 'modes': void this.openModes(); return
+      case 'sessions': this.openSwitcher(); return
+      case 'clear': {
+        const focused = this.focused()
+        if (focused !== undefined) this.store.clearTranscriptView(focused.id)
+        this.scrollOffset = 0
+        this.notice('visible transcript cleared', 'info')
+        return
+      }
+      case 'rename': {
+        const focused = this.focused()
+        if (focused === undefined) return
+        if (input.length === 0) { this.notice('usage: /rename <title>', 'warn'); return }
+        void this.renameSession(focused.id, input)
+        return
+      }
+      case 'new': void this.createSession(); return
+      case 'fork': void this.fork(); return
+      case 'help': this.showHelp = true; this.requestFrame(); return
+      case 'quit': void this.quit(); return
+    }
   }
 
   private async applyModelSelection(
@@ -883,7 +1066,7 @@ export class DeckApp {
   private pendingApprovalTarget(): SessionState | undefined {
     const focused = this.focused()
     if (focused?.pendingApproval !== undefined) return focused
-    return this.store.sessions.find((s) => s.pendingApproval !== undefined)
+    return this.store.sessions.find((s) => pendingApprovalsOf(s).length > 0)
   }
 
   /** Single-key answers, valid only while an approval is outstanding. */
@@ -901,12 +1084,22 @@ export class DeckApp {
 
   private deleteWord(): void {
     const chars = [...this.draft]
-    let i = this.cursor
-    while (i > 0 && chars[i - 1] === ' ') i -= 1
-    while (i > 0 && chars[i - 1] !== ' ') i -= 1
-    chars.splice(i, this.cursor - i)
+    const end = graphemeBoundaryAtOrBefore(this.draft, this.cursor)
+    let i = end
+    while (i > 0) {
+      const start = previousGraphemeBoundary(this.draft, i)
+      if (codePointSlice(this.draft, start, i) !== ' ') break
+      i = start
+    }
+    while (i > 0) {
+      const start = previousGraphemeBoundary(this.draft, i)
+      if (codePointSlice(this.draft, start, i) === ' ') break
+      i = start
+    }
+    chars.splice(i, end - i)
     this.draft = chars.join('')
     this.cursor = i
+    if (end !== i) this.draftRevision += 1
     this.requestFrame()
   }
 
@@ -918,16 +1111,28 @@ export class DeckApp {
     // escape sequences into a prompt; strip everything but tab-as-space.
     const clean = text.replace(/\r/g, '').replace(/\t/g, ' ').replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '')
     this.draft = head + clean + tail
-    this.cursor += [...clean].length
+    if (clean.length > 0) {
+      this.cursor += [...clean].length
+      this.draftRevision += 1
+    }
     this.requestFrame()
+    if (this.draft.startsWith('/') && !/\s/u.test(this.draft)) void this.maybeOpenCommandPalette()
+  }
+
+  private replaceDraft(text: string): void {
+    this.draft = text
+    this.cursor = codePointLength(text)
+    this.draftRevision += 1
   }
 
   private backspace(): void {
-    if (this.cursor === 0) return
+    const previous = previousGraphemeBoundary(this.draft, this.cursor)
+    if (previous === this.cursor) return
     const chars = [...this.draft]
-    chars.splice(this.cursor - 1, 1)
+    chars.splice(previous, this.cursor - previous)
     this.draft = chars.join('')
-    this.cursor -= 1
+    this.cursor = previous
+    this.draftRevision += 1
     this.requestFrame()
   }
 
@@ -1014,7 +1219,9 @@ export class DeckApp {
   }
 
   private async send(mode: 'queue' | 'steer'): Promise<void> {
-    const text = this.draft.trim()
+    const originalDraft = this.draft
+    const originalCursor = this.cursor
+    const text = originalDraft.trim()
     const focused = this.focused()
     // Enter on an empty draft reopens a dismissed question card instead of
     // being a no-op: the agent is blocked until it gets an answer.
@@ -1025,8 +1232,26 @@ export class DeckApp {
     if (text === '' || focused === undefined) return
     this.draft = ''
     this.cursor = 0
+    this.draftRevision += 1
+    const clearedRevision = this.draftRevision
     this.scrollOffset = 0
     this.requestFrame()
+    const slash = parseSlashCommand(text)
+    if (slash !== undefined) {
+      const local = DECK_COMMANDS.find((command) => normalizedCommandName(command.name) === slash.name)
+      if (local?.action !== undefined) {
+        this.runDeckCommand(local.action, slash.input)
+        return
+      }
+      const accepted = await this.runCommand(focused.id, text)
+      if (!accepted && this.draftRevision === clearedRevision) {
+        this.draft = originalDraft
+        this.cursor = originalCursor
+        this.draftRevision += 1
+        this.requestFrame()
+      }
+      return
+    }
     const result = await this.client.call('session.prompt', {
       sessionId: focused.id,
       mode,
@@ -1034,6 +1259,15 @@ export class DeckApp {
       clientTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     })
     if (!result.ok) {
+      // Keep the optimistic clear, but make a failed prompt retryable when the
+      // user has not edited the composer while the RPC was in flight. A newer
+      // draft/caret wins and must never be overwritten by this recovery.
+      if (this.draftRevision === clearedRevision) {
+        this.draft = originalDraft
+        this.cursor = originalCursor
+        this.draftRevision += 1
+        this.requestFrame()
+      }
       // A leading '/' is a slash command upstream; surface its own error text.
       this.notice(result.error.message, 'error')
       return
@@ -1106,7 +1340,8 @@ export class DeckApp {
   }
 
   private visibleTranscriptRows(): number {
-    return Math.max(1, computeLayout(this.screen.columns, this.screen.rows).transcript.height)
+    const sidebarHidden = this.store.sessions.length <= 1
+    return Math.max(1, computeLayout(this.screen.columns, this.screen.rows, { sidebarHidden }).transcript.height)
   }
 
   private focused(): SessionState | undefined {
@@ -1148,11 +1383,16 @@ export class DeckApp {
     if (viewportTooSmall(columns, rows)) {
       this.screen.put(1, 1, `deck needs at least 40x10 (have ${columns}x${rows})`, this.theme.warn)
       this.screen.end()
+      this.screen.hideCursor()
       return
     }
 
-    const draftRows = Math.min(4, Math.max(1, Math.ceil(Math.max(1, stringWidth(this.draft) + 3) / Math.max(1, columns - 2))))
-    const layout: Layout = computeLayout(columns, rows, { composerHeight: draftRows })
+    const sidebarHidden = this.store.sessions.length <= 1
+    const baseLayout = computeLayout(columns, rows, { sidebarHidden })
+    const draftRows = Math.min(4, Math.max(1, Math.ceil(
+      Math.max(1, stringWidth(this.draft) + 3) / Math.max(1, baseLayout.composer.width - 2),
+    )))
+    const layout: Layout = computeLayout(columns, rows, { composerHeight: draftRows, sidebarHidden })
     const focused = this.focused()
 
     renderHeader(this.screen, {
@@ -1204,7 +1444,14 @@ export class DeckApp {
     this.lastLines = lines
     this.paintSelection(layout, lines)
 
-    this.screen.fill(layout.composer.row - 1, 1, columns, 1, this.glyphs.hline, this.theme.border)
+    this.screen.fill(
+      layout.composer.row - 1,
+      layout.composer.col,
+      layout.composer.width,
+      1,
+      this.glyphs.hline,
+      this.theme.border,
+    )
     const caret = renderComposer(this.screen, {
       rect: layout.composer,
       draft: this.draft,
@@ -1216,13 +1463,16 @@ export class DeckApp {
     })
 
     const focusedForHints = this.focused()
+    const approvalForHints = this.pendingApprovalTarget()
+    const approvalCount = approvalForHints === undefined ? 0 : pendingApprovalsOf(approvalForHints).length
+    const questionCount = focusedForHints === undefined ? 0 : pendingQuestionsOf(focusedForHints).length
     renderFooter(this.screen, {
       rect: layout.footer,
       // The hint row is how the user learns the keyboard has changed mode.
-      hints: this.pendingApprovalTarget() !== undefined
-        ? APPROVAL_HINTS
-        : focusedForHints?.pendingQuestion !== undefined && this.overlay === undefined
-          ? QUESTION_HINTS
+      hints: approvalForHints !== undefined
+        ? approvalHints(approvalCount)
+        : questionCount > 0 && (this.overlay === undefined || this.overlay.kind === 'question')
+          ? questionHints(questionCount)
           : KEY_HINTS,
       message: this.message,
       theme: this.theme,
@@ -1242,6 +1492,8 @@ export class DeckApp {
         renderQuestionOverlay(this.screen, layout.transcript, this.overlay.state, this.theme, this.glyphs)
       } else if (this.overlay.kind === 'picker') {
         renderPickerOverlay(this.screen, layout.transcript, this.overlay.state, this.theme, this.glyphs)
+      } else if (this.overlay.kind === 'commands') {
+        renderCommandPalette(this.screen, layout.transcript, this.overlay.state, this.theme, this.glyphs)
       } else {
         imageLayout = this.overlay.layout ?? layoutImageOverlay(layout.transcript, this.overlay.alt)
         this.overlay.layout = imageLayout
@@ -1261,7 +1513,8 @@ export class DeckApp {
         rows: imageLayout.imageCell.rows,
       })
     }
-    void caret
+    if (this.overlay === undefined) this.screen.showCursorAt(caret.row, caret.col)
+    else this.screen.hideCursor()
   }
 
   /**
@@ -1402,6 +1655,70 @@ export class DeckApp {
   }
 }
 
+function normalizedCommandName(name: string): string {
+  return name.replace(/^\/+/, '')
+}
+
+function parseSlashCommand(line: string): { name: string; input: string } | undefined {
+  const match = /^\/([a-z][a-z0-9_-]*)(?:\s+(.*))?$/iu.exec(line)
+  if (match === null || match[1] === undefined) return undefined
+  return { name: match[1].toLocaleLowerCase(), input: match[2]?.trim() ?? '' }
+}
+
+function mergeCommandCatalog(
+  locals: readonly SlashCommandEntry[],
+  host: readonly CommandDescriptor[],
+): SlashCommandEntry[] {
+  const out: SlashCommandEntry[] = []
+  const seen = new Set<string>()
+  for (const command of [...locals, ...host]) {
+    const name = normalizedCommandName(command.name)
+    if (name.length === 0 || seen.has(name)) continue
+    seen.add(name)
+    out.push({ ...command, name })
+  }
+  return out
+}
+
+function codePointLength(text: string): number {
+  return [...text].length
+}
+
+function codePointSlice(text: string, start: number, end?: number): string {
+  return [...text].slice(start, end).join('')
+}
+
+/** Cursor indices stay code-point based for the renderer, but movement is grapheme based. */
+function previousGraphemeBoundary(text: string, cursor: number): number {
+  let offset = 0
+  for (const cluster of graphemes(text)) {
+    const next = offset + codePointLength(cluster)
+    if (cursor <= next) return offset
+    offset = next
+  }
+  return offset
+}
+
+function graphemeBoundaryAtOrBefore(text: string, cursor: number): number {
+  let offset = 0
+  for (const cluster of graphemes(text)) {
+    const next = offset + codePointLength(cluster)
+    if (cursor < next) return offset
+    offset = next
+  }
+  return offset
+}
+
+function nextGraphemeBoundary(text: string, cursor: number): number {
+  let offset = 0
+  for (const cluster of graphemes(text)) {
+    const next = offset + codePointLength(cluster)
+    if (cursor < next) return next
+    offset = next
+  }
+  return offset
+}
+
 /**
  * `thinkingmachines/inkling` reads as `inkling`. The vendor prefix is the same
  * on every model from one route and the route is already shown beside it.
@@ -1440,7 +1757,7 @@ function mapModelCatalog(value: unknown): PickerModel[] {
   if (typeof value !== 'object' || value === null) return []
   const root = value as { current?: unknown; groups?: unknown }
   const current = (typeof root.current === 'object' && root.current !== null)
-    ? root.current as { provider?: unknown; model?: unknown }
+    ? root.current as { provider?: unknown; model?: unknown; reasoningEffort?: unknown }
     : undefined
   if (!Array.isArray(root.groups)) return []
   const out: PickerModel[] = []
@@ -1470,6 +1787,11 @@ function mapModelCatalog(value: unknown): PickerModel[] {
         ...efforts.length > 0 ? { efforts } : {},
         ...typeof reasoning?.defaultEffort === 'string' ? { defaultEffort: reasoning.defaultEffort } : {},
         ...current?.provider === g.id && current.model === m.id ? { current: true } : {},
+        ...current?.provider === g.id
+          && current.model === m.id
+          && typeof current.reasoningEffort === 'string'
+          ? { currentEffort: current.reasoningEffort }
+          : {},
       })
     }
   }

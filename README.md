@@ -6,10 +6,12 @@ A cockpit for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness
 built for [Ghostty](https://ghostty.org). No dependencies, no browser tab, no
 Electron — just `deck`.
 
+![Deck running in Ghostty](docs/screenshots/dsh-deck-ghostty.png)
+
 [![CI](https://github.com/chenghaoYang/dsh-deck/actions/workflows/ci.yml/badge.svg)](https://github.com/chenghaoYang/dsh-deck/actions/workflows/ci.yml)
 ![node](https://img.shields.io/badge/node-%3E%3D22.19-brightgreen)
 ![dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)
-![tests](https://img.shields.io/badge/tests-201%20passing-brightgreen)
+![tests](https://img.shields.io/badge/tests-223%20passing-brightgreen)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 ```
@@ -52,7 +54,7 @@ questions, and the telemetry projections nobody documented.
 <tr><td><b>Every dsh mode, one panel</b></td><td><code>ctrl+s</code>: model, reasoning effort, agent preset, permissions, plan mode, compaction.</td></tr>
 <tr><td><b>Actually interactive</b></td><td>Click to focus, drag to copy, wheel to scroll, <code>ctrl+k</code> to fuzzy-switch sessions.</td></tr>
 <tr><td><b>Terminal-native</b></td><td>Taskbar progress, desktop notifications, clickable file links, inline images, prompt marks — each capability-gated.</td></tr>
-<tr><td><b>Verified on a real terminal</b></td><td>201 unit tests, a protocol e2e, and a 29-step live run that drives the real binary on a real pty against a real model.</td></tr>
+<tr><td><b>Verified on a real terminal</b></td><td>223 unit tests, a protocol e2e, and a 29-step live run that drives the real binary on a real pty against a real model.</td></tr>
 </table>
 
 ## Why
@@ -147,7 +149,8 @@ deck --help
 ### Try it with no API key
 
 Deck ships a fake, dependency-free model server, so the whole product is
-demoable and testable without credentials:
+demoable and testable without credentials. Run this from a source checkout
+(the development-only fake server is not included in the global package):
 
 ```sh
 npm run fake-llm -- --port 4310
@@ -162,7 +165,8 @@ indicator, `long` to test scrolling, `error` to see failure handling.
 ### Any OpenAI-compatible endpoint
 
 The harness ships a generic adapter, so any OpenAI-compatible provider is
-configuration rather than code. Declare a route in `~/.dsh/settings.yaml` —
+configuration rather than code. Declare a route in `$DSH_HOME/settings.yaml`
+(`~/.dsh/settings.yaml` when `DSH_HOME` is unset) —
 declaring the models explicitly matters, because the built-in DeepSeek route
 defaults to `max_tokens: 256000` and most gateways reject that outright:
 
@@ -205,13 +209,17 @@ chain of thought streams into the transcript as reasoning rather than answer
 text.
 
 For the key, either `export NVIDIA_API_KEY=…` before starting the host — a
-per-run override, and it wins — or store it durably in
-`~/.dsh/.credentials.yaml`, which is what the harness's own Models page writes:
+per-run override, and it wins — or add/update the `NVIDIA_API_KEY` mapping in
+`$DSH_HOME/.credentials.yaml` (`~/.dsh/.credentials.yaml` by default), which
+is what the harness's own Models page writes. Preserve any existing provider
+keys in that file:
 
-```sh
-printf 'NVIDIA_API_KEY: nvapi-…\n' > ~/.dsh/.credentials.yaml
-chmod 600 ~/.dsh/.credentials.yaml   # the harness refuses to boot without this
+```yaml
+NVIDIA_API_KEY: nvapi-…
 ```
+
+Then run `chmod 600 "${DSH_HOME:-$HOME/.dsh}/.credentials.yaml"`; the harness
+refuses to boot when the credentials file is readable by other users.
 
 Verified end to end this way against NVIDIA NIM with `thinkingmachines/inkling`:
 streamed reasoning, multi-step turns with real tool calls, prompt-cache hits,
@@ -274,6 +282,7 @@ command, so you can type "add tests" without triggering anything.
 | `ctrl+u` / `ctrl+w` | clear draft / delete word |
 | `up`/`down`, `pgup`/`pgdn`, `ctrl+l` | scroll |
 | `ctrl+g` | help |
+| `/` | live slash-command palette; type to filter, Tab completes |
 
 When an approval is waiting, the overlay takes the keyboard so answering is one
 keystroke: `a`/`y`/`enter` allows, `r`/`n`/`esc` rejects. The footer changes to
@@ -312,6 +321,24 @@ including a change someone made from the web UI.
 | permission | `/permission <preset>` |
 | plan | `/plan` and `/plan off` |
 | compact | `/compact` |
+
+### Slash commands
+
+Type `/` to open a command palette above the composer. The list combines Deck's
+terminal-native actions with the commands the connected dsh host advertises for
+the focused session, so optional plugins appear without a Deck update. Use
+`up`/`down` to move, `tab` to complete, `enter` to run, and `esc` to return the
+filter to the composer.
+
+Deck provides `/model`, `/effort`, `/modes`, `/preset`, `/permissions`,
+`/sessions`, `/resume`, `/new`, `/clear`, `/rename`, `/fork`, `/help`, and
+`/exit`. A standard dsh host currently adds commands such as `/compact`,
+`/export`, `/feedback`, `/goal`, `/permission`, and `/plan`; the palette always
+uses the host's live catalog rather than assuming they are installed.
+
+Commands with arguments complete back into the composer. For example, choose
+`/plan`, type `off`, and press Enter. Deck sends `/plan off` through
+`commands/execute`; it is never mistaken for a model prompt.
 
 ### Mouse
 
@@ -395,7 +422,7 @@ and you can run Deck and any of the above side by side against the same host.
 
 ## Status
 
-Early, but not untested. 201 unit tests, a protocol e2e against a real throwaway
+Early, but not untested. 223 unit tests, a protocol e2e against a real throwaway
 host, and a 29-step live run that drives the shipped binary on a real pty. Last
 verified against `dsh` 0.1.0-rc.7 and `thinkingmachines/inkling` on NVIDIA NIM.
 

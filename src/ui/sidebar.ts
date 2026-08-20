@@ -4,7 +4,7 @@
  */
 
 import { stringWidth, truncate } from '../term/width.ts'
-import type { SessionState } from '../model/store.ts'
+import { pendingApprovalsOf, pendingQuestionsOf, type SessionState } from '../model/store.ts'
 import type { Theme, Glyphs } from './theme.ts'
 import type { Rect } from './layout.ts'
 import {
@@ -104,6 +104,8 @@ function makeSessionRow(
   const idx = String(opts.index).padStart(opts.idxDigits, ' ')
   const label = sessionLabel(session)
   const badge = unreadBadge(session.unread)
+  const waiting = pendingApprovalsOf(session).length + pendingQuestionsOf(session).length
+  const waitingBadge = waitingBadgeText(waiting)
 
   const rest =
     stringWidth(bar) +
@@ -112,7 +114,8 @@ function makeSessionRow(
     1 +
     stringWidth(idx) +
     1 +
-    (badge.length > 0 ? 1 + stringWidth(badge) : 0)
+    (badge.length > 0 ? 1 + stringWidth(badge) : 0) +
+    (waitingBadge.length > 0 ? 1 + stringWidth(waitingBadge) : 0)
   const titleBudget = Math.max(0, width - rest)
   const title = titleBudget > 0 ? truncate(label.text, titleBudget) : ''
 
@@ -131,6 +134,10 @@ function makeSessionRow(
     spans.push({ text: ' ', style: '' })
     spans.push({ text: badge, style: session.pendingApproval !== undefined ? theme.warn : theme.accent })
   }
+  if (waitingBadge.length > 0) {
+    spans.push({ text: ' ', style: theme.warn })
+    spans.push({ text: waitingBadge, style: theme.warn })
+  }
   return makeLine(spans, width)
 }
 
@@ -140,7 +147,7 @@ function statusGlyph(
 ): { glyph: string; style: string } {
   const { theme, glyphs, spinnerFrame } = opts
   // Approval wins: a blocked background agent must not look merely idle/running.
-  if (session.pendingApproval !== undefined) {
+  if (pendingApprovalsOf(session).length > 0) {
     return { glyph: glyphs.approve, style: theme.warn }
   }
   if (session.lastError !== undefined && session.lastError.length > 0) {
@@ -167,4 +174,9 @@ function unreadBadge(unread: number): string {
   if (unread <= 0) return ''
   if (unread > 99) return '99+'
   return String(unread)
+}
+
+function waitingBadgeText(count: number): string {
+  if (count <= 0) return ''
+  return count > 99 ? '99+' : String(count)
 }

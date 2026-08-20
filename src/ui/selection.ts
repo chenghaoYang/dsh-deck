@@ -1,5 +1,5 @@
 /**
- * Mouse selection over a bottom-pinned transcript window.
+ * Mouse selection over the transcript window.
  *
  * screenToPoint must match renderTranscript's windowing:
  *   visible = max(0, rect.height)
@@ -7,7 +7,7 @@
  *   offset = min(max(0, scrollOffset), maxScroll)
  *   end = totalLines - offset
  *   start = max(0, end - visible)
- *   row0 = rect.row + (visible - (end - start))
+ *   row0 = rect.row
  * A grapheme is included iff its first display column is in the half-open range.
  */
 
@@ -47,7 +47,7 @@ export function screenToPoint(
   const end = totalLines - offset
   const start = Math.max(0, end - visible)
   const windowLength = Math.max(0, end - start)
-  const row0 = rect.row + (visible - windowLength)
+  const row0 = rect.row
   if (row < row0 || row >= row0 + windowLength) return undefined
 
   const line = start + (row - row0)
