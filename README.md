@@ -1,19 +1,23 @@
-# deck
+<h1>deck</h1>
 
-**A terminal-native multi-agent cockpit for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness).**
+**Supervise a whole crew of coding agents from one terminal screen.**
 
-Many agents, one screen. Zero dependencies. Built for [Ghostty](https://ghostty.org).
+A cockpit for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness),
+built for [Ghostty](https://ghostty.org). No dependencies, no browser tab, no
+Electron — just `deck`.
 
-Actual output of `npm run preview` (Deck renders its own frames to text, so this
-is not a mockup):
+[![CI](https://github.com/chenghaoYang/dsh-deck/actions/workflows/ci.yml/badge.svg)](https://github.com/chenghaoYang/dsh-deck/actions/workflows/ci.yml)
+![node](https://img.shields.io/badge/node-%3E%3D22.19-brightgreen)
+![dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)
+![tests](https://img.shields.io/badge/tests-201%20passing-brightgreen)
+[![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 ```
-deck  ● ready  refactor the auth module                                 nvidia · openai/gpt-oss-120b
+deck  ● ready  refactor the auth module           nvidia · thinkingmachines/inkling · high  standard
 ▎⠸ 1 refactor the auth mo…│
  ⚠ 2 迁移数据库到 Postg… 1│
  ○ 3 write the release no…│
  ✖ 4 benchmark the parser │
-                          │
                           │ ▸ Refactor the auth module to use JWT instead of session lookups, and
                           │   update the tests.
                           │ · thought for 4 lines
@@ -30,12 +34,26 @@ deck  ● ready  refactor the auth module                                 nvidia
                           │   [a] allow  [r] reject
                           │ Waiting on that edit before I continue with the middleware ⠸
 ────────────────────────────────────────────────────────────────────────────────────────────────────
-also update the integration tests                                                            queue ⏎
+also update the integration tests                                                 ⏎ queue · ⌥⏎ steer
 a allow  r reject
 ```
 
-Session 2 is blocked on an approval you can see without switching to it, and the
-footer has already handed the keyboard over to answer it.
+Four agents. Session 1 is streaming, 4 has failed, and **2 is blocked on an
+approval you can see without switching to it** — the footer has already handed
+the keyboard over so `a` answers it. That frame is the real renderer's output,
+printed to text by `npm run preview`, not a mockup.
+
+Deck talks to the harness over the same `/api` protocol its own web UI uses, so
+it gets the full-fidelity stream — reasoning deltas, tool calls, approvals,
+questions, and the telemetry projections nobody documented.
+
+<table>
+<tr><td><b>One screen, many agents</b></td><td>Background sessions keep streaming while you read another. The sidebar surfaces the one that stopped and is waiting on you.</td></tr>
+<tr><td><b>Every dsh mode, one panel</b></td><td><code>ctrl+s</code>: model, reasoning effort, agent preset, permissions, plan mode, compaction.</td></tr>
+<tr><td><b>Actually interactive</b></td><td>Click to focus, drag to copy, wheel to scroll, <code>ctrl+k</code> to fuzzy-switch sessions.</td></tr>
+<tr><td><b>Terminal-native</b></td><td>Taskbar progress, desktop notifications, clickable file links, inline images, prompt marks — each capability-gated.</td></tr>
+<tr><td><b>Verified on a real terminal</b></td><td>201 unit tests, a protocol e2e, and a 29-step live run that drives the real binary on a real pty against a real model.</td></tr>
+</table>
 
 ## Why
 
@@ -86,8 +104,28 @@ stopped and is waiting on you.
 Requires Node >= 22.19 and the harness CLI.
 
 ```sh
-npm i -g @deepseek-ai/dsh   # the agent runtime
-npm i -g dsh-deck           # this cockpit
+npm i -g @deepseek-ai/dsh                              # the agent runtime
+npm i -g github:chenghaoYang/dsh-deck                  # this cockpit
+```
+
+Not on npm yet. To work on it instead:
+
+```sh
+git clone https://github.com/chenghaoYang/dsh-deck && cd dsh-deck
+npm install && npm run build && npm link
+```
+
+### Make `dsh` open the cockpit
+
+If you would rather never think about `deck` as a separate command, shadow the
+bare `dsh` invocation and leave every subcommand alone:
+
+```sh
+# ~/.zshrc — `dsh` opens the cockpit; `dsh web`, `dsh plugin`, … still reach the
+# real CLI, and `command dsh` always bypasses this.
+dsh() {
+  if (( $# == 0 )); then command deck; else command dsh "$@"; fi
+}
 ```
 
 ## Use
@@ -357,9 +395,20 @@ and you can run Deck and any of the above side by side against the same host.
 
 ## Status
 
-Early. `dsh` itself is a developer preview that warns about breaking changes, and
-Deck mirrors a hand-written copy of its wire contract (`src/protocol/contract.ts`)
-verified against a live host. Expect to pin versions.
+Early, but not untested. 201 unit tests, a protocol e2e against a real throwaway
+host, and a 29-step live run that drives the shipped binary on a real pty. Last
+verified against `dsh` 0.1.0-rc.7 and `thinkingmachines/inkling` on NVIDIA NIM.
+
+`dsh` itself is a developer preview that warns about breaking changes, and Deck
+mirrors a hand-written copy of its wire contract
+([`src/protocol/contract.ts`](src/protocol/contract.ts)) verified against a live
+host, so expect to pin versions. Every shape in there was confirmed on the wire
+rather than read off a type — including a few the harness does not document, like
+the telemetry projections behind the context and throughput readouts.
+
+Issues and PRs welcome, particularly reports from terminals other than Ghostty:
+every integration is capability-gated and degrades to a no-op, but "degrades
+cleanly" is a claim that wants more terminals than one person owns.
 
 ## License
 

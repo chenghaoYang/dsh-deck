@@ -25,7 +25,7 @@ import type { RenderTarget } from '../ui/render.ts'
 import { layoutTranscript, renderTranscript } from '../ui/transcript.ts'
 import { renderSidebar } from '../ui/sidebar.ts'
 import { renderComposer } from '../ui/composer.ts'
-import { renderFooter, renderHeader } from '../ui/statusbar.ts'
+import { renderFooter, renderHeader, type ModeSummary } from '../ui/statusbar.ts'
 
 interface GridCell { char: string; style: string }
 
@@ -90,6 +90,24 @@ class GridTarget implements RenderTarget {
   }
 }
 
+/**
+ * Same flattening the app does, minus the preset-name lookup: a preview has no
+ * host to ask for localized names, so the id stands in.
+ */
+function modeSummaryOf(session: SessionState, host: HostDescription | undefined): ModeSummary {
+  const { model, permissions, plan, agentPreset } = session.modes
+  const provider = model?.provider ?? host?.provider
+  const id = model?.model ?? host?.model
+  return {
+    ...provider === undefined ? {} : { provider },
+    ...id === undefined ? {} : { model: id },
+    ...model?.effort === undefined ? {} : { effort: model.effort },
+    ...permissions === undefined ? {} : { permission: permissions.currentValue },
+    ...plan === undefined ? {} : { plan },
+    ...agentPreset === undefined ? {} : { preset: agentPreset },
+  }
+}
+
 function transcriptOf(items: TranscriptItem[]): TranscriptState {
   return { ...emptyTranscript(), items, lastSeq: items.length }
 }
@@ -112,6 +130,19 @@ function syntheticSessions(): SessionState[] {
     cwd: '/Users/you/code/api',
     running: true,
     updatedAt: Date.now(),
+    modes: {
+      model: { provider: 'nvidia', model: 'thinkingmachines/inkling', effort: 'high' },
+      permissions: {
+        options: [
+          { value: 'read-only', name: 'read-only' },
+          { value: 'workspace-write', name: 'workspace-write' },
+          { value: 'danger-full-access', name: 'danger-full-access' },
+        ],
+        currentValue: 'workspace-write',
+      },
+      plan: { active: false, pending: false },
+      agentPreset: 'standard',
+    },
     transcript: transcriptOf([
       { kind: 'user', seq: 1, time: Date.now(), text: 'Refactor the auth module to use JWT instead of session lookups, and update the tests.' },
       { kind: 'reasoning', seq: 2, turn: 1, step: 1, streaming: false, text: 'The user wants JWT.\nI should read the current auth code first.\nThen find every call site.\nThen update the tests.' },
@@ -245,7 +276,7 @@ async function main(): Promise<void> {
       version: '0.0.1',
       cwd: '/Users/you/code/api',
       provider: 'nvidia',
-      model: 'openai/gpt-oss-120b',
+      model: 'thinkingmachines/inkling',
       attachedSessions: sessions.length,
       home: '/Users/you',
       canOpenPath: true,
@@ -264,6 +295,7 @@ async function main(): Promise<void> {
     theme,
     glyphs,
     ...focused === undefined ? {} : { telemetry: focused.telemetry },
+    ...focused === undefined ? {} : { modes: modeSummaryOf(focused, host) },
   })
   if (layout.sidebar !== undefined) {
     renderSidebar(target, {
