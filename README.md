@@ -64,6 +64,13 @@ stopped and is waiting on you.
 - **Self-healing transcripts.** The harness's committed `assistant/message`
   replaces whatever was accumulated from deltas, so a reconnect mid-turn shows
   the true message rather than a truncated one.
+- **Every dsh mode on one panel.** `ctrl+s` switches the model and reasoning
+  effort, the agent preset, the permission preset, plan mode, and context
+  compaction. The harness scatters these across two different RPC conventions
+  and five method names; that is the host's business, not yours, so here they
+  are five rows. The header keeps the safety-relevant ones visible: `read-only`
+  and `full-access` get saturated color, because "which permissions is this
+  agent running with" is not a question you should have to go looking for.
 - **Terminal-native touches**, each capability-gated and a no-op where
   unsupported: progress in the tab/taskbar while an agent works, a desktop
   notification when an agent needs you, clipboard copy of an answer straight out
@@ -134,17 +141,43 @@ llm-pi-ai:
         supportsDeveloperRole: false
         maxTokensField: max_tokens
       models:
+        - id: thinkingmachines/inkling
+          name: Inkling (NVIDIA)
+          contextWindow: 262144
+          maxTokens: 32768
+          # Offering the levels is what puts an effort picker in the modes
+          # panel; the values are the wire spellings the endpoint expects.
+          reasoningEfforts:
+            low: low
+            medium: medium
+            high: high
+          compat:
+            supportsReasoningEffort: true
         - id: openai/gpt-oss-120b
           contextWindow: 131072
           maxTokens: 8192
 
 agent-default-model:
   provider: nvidia
-  model: openai/gpt-oss-120b
+  model: thinkingmachines/inkling
 ```
 
-Then `export NVIDIA_API_KEY=…` before starting the host. Verified working this
-way against NVIDIA NIM, including multi-step turns with real tool calls.
+`thinkingFormat: deepseek` is what decodes Inkling's `reasoning_content`, so its
+chain of thought streams into the transcript as reasoning rather than answer
+text.
+
+For the key, either `export NVIDIA_API_KEY=…` before starting the host — a
+per-run override, and it wins — or store it durably in
+`~/.dsh/.credentials.yaml`, which is what the harness's own Models page writes:
+
+```sh
+printf 'NVIDIA_API_KEY: nvapi-…\n' > ~/.dsh/.credentials.yaml
+chmod 600 ~/.dsh/.credentials.yaml   # the harness refuses to boot without this
+```
+
+Verified end to end this way against NVIDIA NIM with `thinkingmachines/inkling`:
+streamed reasoning, multi-step turns with real tool calls, prompt-cache hits,
+and every mode in the panel above.
 
 ### See the layout without running it
 
@@ -156,6 +189,29 @@ npm run preview                                    # synthetic cockpit
 npm run preview -- --plain --width 100 --height 28 # no color, for pasting
 npm run preview -- --attach http://127.0.0.1:3080  # your real sessions
 ```
+
+### Verifying it against a real host
+
+Unit tests check the parts and `npm run e2e` checks the protocol, but neither
+can tell you the product works: Deck paints by cell diff, so its output is a
+stream of cursor moves rather than lines of text. `npm run verify` drives the
+real binary on a real pty against a real host, replays that stream back into a
+character grid, and asserts on what actually reached the screen — then
+cross-checks each mode switch against the host's own projections, so a green
+step cannot mean "Deck drew something plausible".
+
+```sh
+npm run verify -- --attach http://127.0.0.1:3080          # drive src/
+npm run verify -- --attach http://127.0.0.1:3080 --built  # drive the shipped bin
+```
+
+It writes every step as a screenshot, which is how the bugs it found were
+diagnosed: a header whose title collided with the permission chip, a CJK preset
+name that overran the modes panel by four columns and left stale cells behind on
+the next frame, harness-injected context rendered as though the user had typed
+it, and — only ever reproducible on a real terminal — `ctrl+d` restoring the
+terminal and then never exiting, because a resumed tty keeps Node's event loop
+alive where a pipe would have hit EOF.
 
 ### Keys
 
@@ -169,6 +225,9 @@ command, so you can type "add tests" without triggering anything.
 | `tab` | next session |
 | `alt+1`…`alt+9` | jump to a session |
 | `ctrl+n` | new session |
+| `ctrl+s` | modes: model, agent preset, permission, plan, compact |
+| `ctrl+p` | model and reasoning effort |
+| `ctrl+k` | session switcher |
 | `ctrl+f` | fork the session |
 | `ctrl+c` | cancel the running turn, or quit when idle |
 | `ctrl+d` | quit |
@@ -181,6 +240,40 @@ command, so you can type "add tests" without triggering anything.
 When an approval is waiting, the overlay takes the keyboard so answering is one
 keystroke: `a`/`y`/`enter` allows, `r`/`n`/`esc` rejects. The footer changes to
 show it.
+
+### Modes
+
+`ctrl+s` opens one panel over the transcript:
+
+```
+╭─ modes ──────────────────────────────────────────────────────╮
+│› model      nvidia · inkling · high                          │
+│  agent      标准模式 locked once the session has run a turn  │
+│  permission workspace-write                                  │
+│  plan       off                                              │
+│  compact    compact older history now                        │
+│↑↓ move · ⏎ change · esc close                                │
+╰──────────────────────────────────────────────────────────────╯
+```
+
+`enter` on a row lists its options and `enter` again applies it; the panel stays
+open and the row shows its new value, so adjusting two things is two keystrokes
+rather than two trips. Clicking works too. Names come from the host, so a
+Chinese-locale harness shows `标准模式` rather than `standard`.
+
+Rows say what they cannot do instead of failing later: the agent preset is
+`locked once the session has run a turn`, because that is when the harness stops
+accepting the change. Permission and plan are read back from the host's own
+projections, so the panel reflects what the agent is actually running under —
+including a change someone made from the web UI.
+
+| Row | Reaches the host as |
+|---|---|
+| model | `session.selectModel`, with the model's own reasoning efforts |
+| agent | `agentPreset.select`, blank sessions only |
+| permission | `/permission <preset>` |
+| plan | `/plan` and `/plan off` |
+| compact | `/compact` |
 
 ### Mouse
 

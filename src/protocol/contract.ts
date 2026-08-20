@@ -280,6 +280,58 @@ export interface QuestionResponsePayload {
   answer: AskUserQuestionAnswer
 }
 
+// ---------------------------------------------------------------------------
+// Modes. dsh splits per-session mode switching across two carriers that share
+// the /api prefix but not their payload convention, so both are named here.
+//
+//   dotted   `session.selectModel`   — payload IS the business object
+//   slashed  `commands/execute`      — payload MUST be `{ args: { … } }`
+//
+// Model and agent preset are dotted Host methods. Permission, plan, and
+// compaction have no Host unary at all: the official web UI drives them by
+// executing the same slash commands a human would type, which is why deck does
+// too. Verified against a live rc.7 host.
+// ---------------------------------------------------------------------------
+
+export interface AgentPresetEntry {
+  id: string
+  trust: 'system' | 'user'
+  isDefault: boolean
+  /** Localized; Chinese on a zh host. */
+  name?: string
+  description?: string
+  /** Present when the preset cannot be served; the string is why. */
+  broken?: string
+}
+
+export interface CommandDescriptor {
+  name: string
+  description: string
+  input?: { hint?: string; images?: boolean }
+}
+
+/**
+ * A command that ran. `result.kind` is where business failure lands — an
+ * unknown preset answers `ok: true` at the RPC layer and `kind: 'error'` here.
+ * The whole value is absent when the line named no command at all.
+ */
+export interface CommandExecution {
+  commandId: string
+  result: { kind: 'success'; text?: string } | { kind: 'error'; text: string }
+}
+
+/** `permissions` projection: the preset list plus which one is in effect. */
+export interface PermissionsProjection {
+  options: { value: string; name: string }[]
+  currentValue: string
+}
+
+/** `plan` projection. `pending` means the switch is queued behind the open turn. */
+export interface PlanProjection {
+  active: boolean
+  pending: boolean
+}
+
 /**
  * Method table. Deck deliberately implements a subset; the full map lives at
  * packages/host/apiproxy/src/api/rpc-map.ts upstream.
@@ -315,6 +367,25 @@ export interface RpcMethods {
   /** Archived sessions stay in session.list; clients hide them via this registry. Verified live. */
   'workspace.list': { payload: {}; value: { items: unknown[]; archivedSessionIds: SessionId[] } }
   'workspace.archiveSession': { payload: { sessionId: SessionId }; value: { archivedSessionIds: SessionId[] } }
+  'agentPreset.list': {
+    payload: {}
+    value: { presets: AgentPresetEntry[]; authorable: boolean; hasDocument: boolean }
+  }
+  /** Refused with `agent-preset-locked` once the session has run a turn. */
+  'agentPreset.select': {
+    payload: { sessionId: SessionId; agentPreset: string }
+    value: { agentPreset: string }
+  }
+  /**
+   * Slash-command remotes. `agentId` is the session id, and `images` is
+   * required even for commands that take none — the gateway matches args
+   * against the descriptor by exact field set and rejects a short one.
+   */
+  'commands/list': { payload: { args: { agentId: SessionId } }; value: CommandDescriptor[] }
+  'commands/execute': {
+    payload: { args: { agentId: SessionId; line: string; images: never[] } }
+    value: CommandExecution | undefined
+  }
 }
 
 export type RpcMethodName = keyof RpcMethods

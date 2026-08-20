@@ -23,8 +23,18 @@ import { computeLayout, viewportTooSmall, type Layout } from './layout.ts'
 import { layoutTranscript, renderTranscript, type RenderedLine } from './transcript.ts'
 import { renderSidebar } from './sidebar.ts'
 import { renderComposer } from './composer.ts'
-import { renderFooter, renderHeader } from './statusbar.ts'
+import { renderFooter, renderHeader, type ModeSummary } from './statusbar.ts'
 import { renderHelp } from './help.ts'
+import {
+  createModes,
+  modesHitTest,
+  reduceModes,
+  renderModes,
+  updateModesRows,
+  type ModeRow,
+  type ModeRowId,
+  type ModesState,
+} from './modes.ts'
 import {
   createPickerOverlay,
   createQuestionOverlay,
@@ -59,7 +69,7 @@ import {
   type Selection,
 } from './selection.ts'
 import { sidebarHitTest } from './sidebar.ts'
-import type { AskUserQuestionAnswer, RpcId } from '../protocol/contract.ts'
+import type { AgentPresetEntry, AskUserQuestionAnswer, RpcId } from '../protocol/contract.ts'
 import { cursorTo, sgr } from '../term/ansi.ts'
 import { appendFileSync } from 'node:fs'
 import { spawn } from 'node:child_process'
@@ -72,6 +82,7 @@ const SPINNER_INTERVAL_MS = 90
 const KEY_HINTS = [
   { key: 'tab', label: 'switch' },
   { key: '^k', label: 'sessions' },
+  { key: '^s', label: 'modes' },
   { key: '^n', label: 'new' },
   { key: '^c', label: 'cancel' },
   { key: '^g', label: 'help' },
@@ -92,6 +103,7 @@ type Overlay =
   | { kind: 'picker'; sessionId: SessionId; state: PickerOverlayState }
   | { kind: 'image'; alt: string; data: Uint8Array; transmitted: boolean; layout?: ImageOverlayLayout }
   | { kind: 'switcher'; state: SwitcherState }
+  | { kind: 'modes'; sessionId: SessionId; state: ModesState }
 
 function inRect(rect: { row: number; col: number; width: number; height: number }, row: number, col: number): boolean {
   return row >= rect.row && row < rect.row + rect.height && col >= rect.col && col < rect.col + rect.width
@@ -108,6 +120,7 @@ const BINDINGS = [
   { keys: 'shift+drag', label: 'bypass deck — the terminal\u2019s own selection, always available' },
   { keys: 'ctrl+t', label: 'toggle mouse capture (off = native terminal selection)' },
   { keys: 'ctrl+n', label: 'new session in the current directory' },
+  { keys: 'ctrl+s', label: 'modes: model, agent preset, permission, plan, compact' },
   { keys: 'ctrl+p', label: 'pick the model and reasoning effort' },
   { keys: 'ctrl+o', label: 'view the latest image inline (Kitty graphics)' },
   { keys: 'ctrl+f', label: 'fork the focused session' },
@@ -175,6 +188,10 @@ export class DeckApp {
   /** Sessions whose history fetch is in flight, so focus does not refetch. */
   private readonly historyInFlight = new Set<SessionId>()
   private lastProgress = -1
+  /** Host-wide and immutable for a run, so fetched once and kept. */
+  private agentPresets: readonly AgentPresetEntry[] | undefined
+  /** Sessions whose model selection has been asked for, so focus asks once. */
+  private readonly modelFetched = new Set<SessionId>()
 
   constructor(options: DeckAppOptions) {
     this.options = options
@@ -231,6 +248,13 @@ export class DeckApp {
     // hide them, and this is its reconnect baseline.
     const workspace = await this.client.call('workspace.list', {})
     if (workspace.ok) this.store.applyArchivedBaseline(workspace.value.archivedSessionIds)
+    // Preset names are localized by the host, and the header shows one. Fetch
+    // the catalog now so it reads "标准模式" from the first frame rather than
+    // the bare id until the user happens to open the modes panel.
+    if (this.agentPresets === undefined) {
+      const presets = await this.client.call('agentPreset.list', {})
+      if (presets.ok) this.agentPresets = presets.value.presets
+    }
     const result = await this.client.call('session.list', {})
     if (!result.ok) {
       this.notice(`session.list failed: ${result.error.message}`, 'error')
@@ -273,6 +297,10 @@ export class DeckApp {
         this.maybeOpenQuestion()
       }
     }
+    // Permission and plan arrive as projections on the status channel, so an
+    // open modes panel picks up its own switch from the host rather than
+    // guessing what the switch did.
+    if (kind === 'status' || kind === 'sessions') this.refreshModes()
     this.requestFrame()
   }
 
@@ -391,6 +419,7 @@ export class DeckApp {
       case 'p': void this.openPicker(); return
       case 'o': void this.openLatestImage(); return
       case 'k': this.openSwitcher(); return
+      case 's': void this.openModes(); return
       case 't': this.toggleMouse(); return
       default: return
     }
@@ -412,6 +441,138 @@ export class DeckApp {
       blocked: s.pendingApproval !== undefined || s.pendingQuestion !== undefined,
       updatedAt: s.updatedAt,
     }))
+  }
+
+  // -- modes -----------------------------------------------------------------
+
+  /**
+   * The modes panel is the one place every per-session dsh mode is switched.
+   * It exists because dsh scatters them across two RPC conventions and five
+   * method names, which is the host's business and not the user's: here they
+   * are five rows.
+   */
+  private async openModes(): Promise<void> {
+    const focused = this.focused()
+    if (focused === undefined || this.overlay !== undefined) return
+    // Normally prefetched on connect; this covers a host that gained presets
+    // since, and a connect where the call failed.
+    if (this.agentPresets === undefined) {
+      const result = await this.client.call('agentPreset.list', {})
+      if (result.ok) this.agentPresets = result.value.presets
+      // Awaiting above means another overlay may have opened meanwhile.
+      if (this.overlay !== undefined) return
+    }
+    this.overlay = { kind: 'modes', sessionId: focused.id, state: createModes(this.modeRows(focused)) }
+    this.requestFrame()
+  }
+
+  private modeRows(session: SessionState): ModeRow[] {
+    const modes = session.modes
+    const model = modes.model
+    const permissions = modes.permissions
+    const plan = modes.plan
+
+    const presetOptions = (this.agentPresets ?? []).map((preset) => ({
+      value: preset.id,
+      label: preset.name ?? preset.id,
+      ...preset.description === undefined ? {} : { detail: preset.description },
+      ...preset.id === modes.agentPreset ? { current: true } : {},
+      ...preset.broken === undefined ? {} : { disabled: preset.broken },
+    }))
+    const presetLabel = this.agentPresets?.find((p) => p.id === modes.agentPreset)
+    // The host refuses agentPreset.select once a turn has run, so say so here
+    // rather than letting the user pick and collecting `agent-preset-locked`.
+    const presetLocked = session.blank ? undefined : 'locked once the session has run a turn'
+
+    return [
+      {
+        id: 'model',
+        label: 'model',
+        value: model === undefined
+          ? 'host default'
+          : `${model.provider} · ${shortModelId(model.model)}${model.effort === undefined ? '' : ` · ${model.effort}`}`,
+      },
+      {
+        id: 'agent',
+        label: 'agent',
+        value: presetLabel?.name ?? modes.agentPreset ?? 'default',
+        optionsTitle: 'agent preset',
+        options: presetOptions,
+        ...presetLocked === undefined ? {} : { disabled: presetLocked },
+      },
+      {
+        id: 'permission',
+        label: 'permission',
+        value: permissions?.currentValue ?? 'unknown',
+        optionsTitle: 'permission preset',
+        options: (permissions?.options ?? []).map((option) => ({
+          value: option.value,
+          label: option.name,
+          ...option.value === 'danger-full-access' ? { detail: 'no approval prompts at all' } : {},
+          ...option.value === 'read-only' ? { detail: 'refuses every write' } : {},
+          ...option.value === permissions?.currentValue ? { current: true } : {},
+        })),
+      },
+      {
+        id: 'plan',
+        label: 'plan',
+        value: plan === undefined ? 'unknown' : plan.pending ? 'pending' : plan.active ? 'on' : 'off',
+        optionsTitle: 'plan mode',
+        options: [
+          { value: 'on', label: 'on', detail: 'plan first, do not touch anything', ...plan?.active === true ? { current: true } : {} },
+          { value: 'off', label: 'off', ...plan?.active === false ? { current: true } : {} },
+        ],
+      },
+      { id: 'compact', label: 'compact', value: 'compact older history now' },
+    ]
+  }
+
+  /** Refresh the open panel from the store, so a switch shows its new value. */
+  private refreshModes(): void {
+    if (this.overlay?.kind !== 'modes') return
+    const session = this.store.get(this.overlay.sessionId)
+    if (session === undefined) return
+    this.overlay = { ...this.overlay, state: updateModesRows(this.overlay.state, this.modeRows(session)) }
+  }
+
+  private async chooseMode(sessionId: SessionId, row: ModeRowId, value: string): Promise<void> {
+    if (row === 'agent') {
+      const result = await this.client.call('agentPreset.select', { sessionId, agentPreset: value })
+      if (!result.ok) this.notice(`agent preset: ${result.error.message}`, 'error')
+      else this.notice(`agent preset: ${result.value.agentPreset}`, 'info')
+      return
+    }
+    if (row === 'permission') {
+      await this.runCommand(sessionId, `/permission ${value}`)
+      return
+    }
+    if (row === 'plan') {
+      await this.runCommand(sessionId, value === 'on' ? '/plan' : '/plan off')
+      return
+    }
+  }
+
+  /**
+   * Runs a dsh slash command through the Typert remote the official web UI
+   * uses. Two failure layers: the RPC can fail, and a command that ran can
+   * still answer `kind: 'error'`. An absent value means no command matched.
+   */
+  private async runCommand(sessionId: SessionId, line: string): Promise<void> {
+    const result = await this.client.call('commands/execute', {
+      args: { agentId: sessionId, line, images: [] },
+    })
+    if (!result.ok) {
+      this.notice(`${line}: ${result.error.message}`, 'error')
+      return
+    }
+    const execution = result.value
+    if (execution === undefined) {
+      this.notice(`${line}: this host has no such command`, 'warn')
+      return
+    }
+    const outcome = execution.result
+    if (outcome.kind === 'error') this.notice(outcome.text, 'error')
+    else if (outcome.text !== undefined && outcome.text !== '') this.notice(outcome.text, 'info')
   }
 
   private async archiveSession(id: SessionId): Promise<void> {
@@ -444,9 +605,19 @@ export class DeckApp {
         appendFileSync(this.debugKeysPath, `#mouse overlay=${this.overlay?.kind ?? 'none'} layout=${this.lastLayout === undefined ? 'undefined' : JSON.stringify({ t: this.lastLayout.transcript, s: this.lastLayout.sidebar })} screen=${this.screen.columns}x${this.screen.rows}\n`)
       } catch { /* trace only */ }
     }
-    if (this.overlay !== undefined) return
     const layout = this.lastLayout
     if (layout === undefined) return
+
+    // The modes panel is the one overlay worth clicking: it is a list of
+    // switches, and reaching for the arrow keys to flip one is the exact
+    // friction the panel exists to remove.
+    if (this.overlay?.kind === 'modes') {
+      if (key.kind === 'mouse' && key.action === 'down' && key.button === 'left') {
+        this.onModesClick(this.overlay, layout, key.row, key.col)
+      }
+      return
+    }
+    if (this.overlay !== undefined) return
 
     if (key.kind === 'wheel') {
       if (inRect(layout.transcript, key.row, key.col) || (layout.sidebar !== undefined && inRect(layout.sidebar, key.row, key.col))) {
@@ -502,6 +673,34 @@ export class DeckApp {
   }
 
   /**
+   * A click on a mode row selects it and drills in, and a click on an option
+   * chooses it — the same two steps the keyboard takes, without the keyboard.
+   */
+  private onModesClick(
+    overlay: Extract<Overlay, { kind: 'modes' }>,
+    layout: Layout,
+    row: number,
+    col: number,
+  ): void {
+    const hit = modesHitTest(overlay.state, layout.transcript, row, col)
+    if (hit === undefined) return
+    const state = overlay.state
+    if (hit.kind === 'row') {
+      const target = state.rows[hit.index]
+      if (target === undefined) return
+      // Route through the reducer so a disabled row, an action row, and a
+      // drill-in all behave exactly as they do from the keyboard.
+      this.overlay = { ...overlay, state: { ...state, cursor: hit.index } }
+      this.onOverlayKey(this.overlay, { kind: 'enter' })
+      return
+    }
+    const options = state.rows[state.cursor]?.options
+    if (options === undefined || options[hit.index] === undefined) return
+    this.overlay = { ...overlay, state: { ...state, optionCursor: hit.index } }
+    this.onOverlayKey(this.overlay, { kind: 'enter' })
+  }
+
+  /**
    * Two-route copy, the pattern Grok Build uses: the OS clipboard tool first
    * (works even when the terminal refuses OSC 52 writes), OSC 52 as well
    * (works across SSH where pbcopy does not exist).
@@ -533,6 +732,30 @@ export class DeckApp {
   // -- overlays --------------------------------------------------------------
 
   private onOverlayKey(overlay: Overlay, key: Key): void {
+    if (overlay.kind === 'modes') {
+      const result = reduceModes(overlay.state, key)
+      switch (result.kind) {
+        case 'continue':
+          this.overlay = { ...overlay, state: result.state }
+          break
+        case 'chose':
+          // The panel stays open: switching a mode is usually one of several
+          // adjustments, and the row must visibly take the new value.
+          this.overlay = { ...overlay, state: result.state }
+          void this.chooseMode(overlay.sessionId, result.row, result.value)
+          break
+        case 'fired':
+          this.overlay = undefined
+          if (result.row === 'model') void this.openPicker()
+          else if (result.row === 'compact') void this.runCommand(overlay.sessionId, '/compact')
+          break
+        case 'cancelled':
+          this.overlay = undefined
+          break
+      }
+      this.requestFrame()
+      return
+    }
     if (overlay.kind === 'switcher') {
       const result = reduceSwitcher(overlay.state, key)
       switch (result.kind) {
@@ -615,8 +838,17 @@ export class DeckApp {
     selection: { provider: string; model: string; reasoningEffort?: string },
   ): Promise<void> {
     const result = await this.client.call('session.selectModel', { sessionId, ...selection })
-    if (!result.ok) this.notice(`model change failed: ${result.error.message}`, 'error')
-    else this.notice(`model: ${result.value.selected.provider} · ${result.value.selected.model}`, 'info')
+    if (!result.ok) {
+      this.notice(`model change failed: ${result.error.message}`, 'error')
+      return
+    }
+    const selected = result.value.selected
+    this.store.applyModelSelection(sessionId, {
+      provider: selected.provider,
+      model: selected.model,
+      ...selected.reasoningEffort === undefined ? {} : { effort: selected.reasoningEffort },
+    })
+    this.notice(`model: ${selected.provider} · ${shortModelId(selected.model)}`, 'info')
   }
 
   private async openLatestImage(): Promise<void> {
@@ -720,8 +952,27 @@ export class DeckApp {
     this.selection = undefined
     this.drag = undefined
     void this.loadHistory(id)
+    void this.loadModelSelection(id)
     this.maybeOpenQuestion()
     this.requestFrame()
+  }
+
+  /**
+   * Nothing on the wire announces which model a session is using — there is no
+   * projection for it — so the header would otherwise show the host-wide
+   * default forever. `session.models` is the only source, and it is asked once
+   * per session.
+   */
+  private async loadModelSelection(id: SessionId): Promise<void> {
+    if (this.modelFetched.has(id)) return
+    this.modelFetched.add(id)
+    const result = await this.client.call('session.models', { sessionId: id })
+    if (!result.ok) {
+      this.modelFetched.delete(id)
+      return
+    }
+    const current = currentModelOf(result.value)
+    if (current !== undefined) this.store.applyModelSelection(id, current)
   }
 
   private async loadHistory(id: SessionId): Promise<void> {
@@ -862,6 +1113,22 @@ export class DeckApp {
     return this.store.focusedId === undefined ? undefined : this.store.get(this.store.focusedId)
   }
 
+  /** Flattens session mode state into the header's chip cluster. */
+  private modeSummary(session: SessionState): ModeSummary {
+    const { model, permissions, plan, agentPreset } = session.modes
+    const preset = this.agentPresets?.find((p) => p.id === agentPreset)?.name ?? agentPreset
+    return {
+      ...model === undefined ? {} : {
+        provider: model.provider,
+        model: model.model,
+        ...model.effort === undefined ? {} : { effort: model.effort },
+      },
+      ...permissions === undefined ? {} : { permission: permissions.currentValue },
+      ...plan === undefined ? {} : { plan },
+      ...preset === undefined ? {} : { preset },
+    }
+  }
+
   private titleOf(session: SessionState): string {
     if (session.title !== undefined && session.title !== '') return session.title
     if (session.cwd !== undefined) {
@@ -896,6 +1163,7 @@ export class DeckApp {
       theme: this.theme,
       glyphs: this.glyphs,
       ...focused === undefined ? {} : { telemetry: focused.telemetry },
+      ...focused === undefined ? {} : { modes: this.modeSummary(focused) },
     })
 
     if (layout.sidebar !== undefined) {
@@ -966,7 +1234,9 @@ export class DeckApp {
 
     let imageLayout: ImageOverlayLayout | undefined
     if (this.overlay !== undefined) {
-      if (this.overlay.kind === 'switcher') {
+      if (this.overlay.kind === 'modes') {
+        renderModes(this.screen, layout.transcript, this.overlay.state, this.theme, this.glyphs)
+      } else if (this.overlay.kind === 'switcher') {
         renderSwitcher(this.screen, layout.transcript, this.overlay.state, this.theme, this.glyphs)
       } else if (this.overlay.kind === 'question') {
         renderQuestionOverlay(this.screen, layout.transcript, this.overlay.state, this.theme, this.glyphs)
@@ -1129,6 +1399,33 @@ export class DeckApp {
       }
     }
     out.write('\n')
+  }
+}
+
+/**
+ * `thinkingmachines/inkling` reads as `inkling`. The vendor prefix is the same
+ * on every model from one route and the route is already shown beside it.
+ */
+function shortModelId(model: string): string {
+  const cut = model.lastIndexOf('/')
+  return cut === -1 ? model : model.slice(cut + 1)
+}
+
+/** Pulls `current` out of a `session.models` value, which is typed unknown. */
+function currentModelOf(value: unknown): { provider: string; model: string; effort?: string } | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const current = (value as { current?: unknown }).current
+  if (typeof current !== 'object' || current === null) return undefined
+  const { provider, model, reasoningEffort } = current as {
+    provider?: unknown
+    model?: unknown
+    reasoningEffort?: unknown
+  }
+  if (typeof provider !== 'string' || typeof model !== 'string') return undefined
+  return {
+    provider,
+    model,
+    ...typeof reasoningEffort === 'string' ? { effort: reasoningEffort } : {},
   }
 }
 

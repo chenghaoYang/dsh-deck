@@ -141,6 +141,17 @@ export class InputReader {
       }
     }
     this.#wasRaw = undefined
+    // start() resumed the stream, and a resumed tty keeps the event loop alive
+    // for as long as the process lives — a real terminal never reaches EOF the
+    // way a pipe does. Without this the app restores the terminal on quit and
+    // then hangs, leaving the user looking at a returned prompt in a shell that
+    // has not actually got control back.
+    try {
+      this.#input.pause?.()
+      this.#input.unref?.()
+    } catch {
+      // stream may already be closed
+    }
   }
 
   onKey(listener: (key: Key) => void): () => void {

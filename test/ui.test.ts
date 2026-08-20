@@ -142,6 +142,7 @@ function session(id: string, extra: {
     queue: [],
     unread: extra.unread ?? 0,
     telemetry: {},
+    modes: {},
   }
   if (extra.title !== undefined) row.title = extra.title
   if (extra.cwd !== undefined) row.cwd = extra.cwd

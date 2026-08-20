@@ -95,13 +95,14 @@ function transcriptOf(items: TranscriptItem[]): TranscriptState {
 }
 
 function syntheticSessions(): SessionState[] {
-  const base: Pick<SessionState, 'historyLoaded' | 'hasMoreHistory' | 'queue' | 'unread' | 'blank' | 'telemetry'> = {
+  const base: Pick<SessionState, 'historyLoaded' | 'hasMoreHistory' | 'queue' | 'unread' | 'blank' | 'telemetry' | 'modes'> = {
     historyLoaded: true,
     hasMoreHistory: false,
     queue: [],
     unread: 0,
     blank: false,
     telemetry: {},
+    modes: {},
   }
 
   const focused: SessionState = {

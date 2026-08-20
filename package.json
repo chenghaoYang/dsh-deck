@@ -29,6 +29,7 @@
     "SPEC.md",
     "README.md"
   ],
+  "//": "scripts/ is intentionally not published: pty-bridge.py and verify-live.mjs are development tools, not runtime dependencies.",
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "node --experimental-strip-types src/cli.ts",
@@ -37,7 +38,8 @@
     "test": "node --experimental-strip-types --test test/*.test.ts",
     "fake-llm": "node --experimental-strip-types src/dev/fake-llm.ts",
     "preview": "node --experimental-strip-types src/dev/preview.ts",
-    "e2e": "node --experimental-strip-types scripts/e2e.mjs"
+    "e2e": "node --experimental-strip-types scripts/e2e.mjs",
+    "verify": "node --experimental-strip-types scripts/verify-live.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.20.0",

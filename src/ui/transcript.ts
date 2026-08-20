@@ -157,12 +157,24 @@ function layoutImage(
   return makeLine([{ text: truncate(text, width), style: options.theme.subtle }], width)
 }
 
+/**
+ * The inbox carries two unlike things under one shape. `queued` and `steering`
+ * items are prompts the user wrote and the agent has not read yet, so they
+ * belong behind the user glyph. `context` items are notes the harness injects
+ * on the user's behalf — switching the permission preset appends "The approval
+ * policy changed from …" — and showing those behind the same glyph reads as if
+ * the user had typed them and was waiting to send. They are worth showing (the
+ * agent is about to be told something) but they are not the user talking.
+ */
 function layoutQueued(
   item: QueuedInboxItem,
   options: TranscriptLayoutOptions,
   width: number,
 ): RenderedLine {
-  const prefix = `${options.glyphs.user} (queued) `
+  const injected = item.placement === 'context'
+  const prefix = injected
+    ? `${options.glyphs.reasoning} (context) `
+    : `${options.glyphs.user} (queued) `
   const prefixW = stringWidth(prefix)
   if (prefixW >= width) {
     return makeLine([{ text: truncate(prefix.trimEnd(), width), style: options.theme.dim }], width)

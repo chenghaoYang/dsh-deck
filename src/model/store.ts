@@ -17,6 +17,8 @@ import type {
   HistoryEntry,
   HostFrame,
   MuxFrame,
+  PermissionsProjection,
+  PlanProjection,
   QueuedInboxItem,
   RpcId,
   SessionId,
@@ -43,6 +45,21 @@ export interface SessionState {
   unread: number
   lastError?: string
   telemetry: SessionTelemetry
+  modes: SessionModes
+}
+
+/**
+ * Per-session mode state. Permission and plan arrive as projections, so they
+ * replay on history and update live without deck ever polling. The model
+ * selection has no projection — nothing on the wire announces it — so it is
+ * filled in by whoever last called `session.models` or `session.selectModel`.
+ */
+export interface SessionModes {
+  permissions?: PermissionsProjection
+  plan?: PlanProjection
+  model?: { provider: string; model: string; effort?: string }
+  /** Preset id from the host; its display name needs `agentPreset.list`. */
+  agentPreset?: string
 }
 
 export interface PendingApproval {
@@ -79,6 +96,8 @@ export class DeckStore {
   private readonly byId = new Map<SessionId, SessionState>()
   /** Higher-seq-wins cells keyed by `${sessionId}\0${key}`. */
   private readonly projections = new Map<string, { seq: number; value: unknown }>()
+  /** Model selections learned from `session.models` / `session.selectModel`. */
+  private readonly modelSelections = new Map<SessionId, { provider: string; model: string; effort?: string }>()
   private readonly listeners = new Set<(event: StoreChange) => void>()
   private readonly pending = new Map<string, StoreChange>()
   private scheduled = false
@@ -213,6 +232,7 @@ export class DeckStore {
         queue: prev?.queue ?? [],
         unread: prev?.unread ?? 0,
         telemetry: prev?.telemetry ?? {},
+        modes: prev?.modes ?? {},
       }
       copyOptional(next, prev, item)
       this.byId.set(item.sessionId, next)
@@ -254,6 +274,10 @@ export class DeckStore {
         queue: [],
         unread: session.unread,
         telemetry: session.telemetry,
+        // Permission and plan replay from the history projection cut, and the
+        // model selection is refetched on focus, so keeping them across a
+        // generation boundary avoids a blank header during the refetch.
+        modes: session.modes,
       }
       if (session.title !== undefined) next.title = session.title
       if (session.cwd !== undefined) next.cwd = session.cwd
@@ -379,10 +403,30 @@ export class DeckStore {
     this.emit({ kind: 'question', sessionId: frame.sessionId })
   }
 
+  /**
+   * Records the model a session is actually using. There is no projection for
+   * it, so this is the only way the header can stop showing the host-wide
+   * default after a per-session switch.
+   */
+  applyModelSelection(id: SessionId, selection: { provider: string; model: string; effort?: string }): void {
+    const prev = this.modelSelections.get(id)
+    if (
+      prev !== undefined
+      && prev.provider === selection.provider
+      && prev.model === selection.model
+      && prev.effort === selection.effort
+    ) return
+    this.modelSelections.set(id, selection)
+    const session = this.ensure(id)
+    this.byId.set(id, { ...session, modes: { ...session.modes, model: selection } })
+    this.emit({ kind: 'status', sessionId: id })
+  }
+
   private applyProjection(sessionId: SessionId, key: string, value: unknown, seq: number): void {
     const isTitle = key.toLowerCase().includes('title')
     const isTelemetry = key === 'contextPressure' || key === 'contextBreakdown' || key === 'sessionStats'
-    if (!isTitle && !isTelemetry) return
+    const isMode = key === 'permissions' || key === 'plan'
+    if (!isTitle && !isTelemetry && !isMode) return
     const cell = `${sessionId}\0${key}`
     const prev = this.projections.get(cell)
     if (prev !== undefined && seq <= prev.seq) return
@@ -395,7 +439,19 @@ export class DeckStore {
       this.emit({ kind: 'sessions' })
       return
     }
+    if (isMode) {
+      this.applyModeProjection(sessionId, key, value)
+      return
+    }
     this.applyTelemetryProjection(sessionId, key, value)
+  }
+
+  private applyModeProjection(sessionId: SessionId, key: string, value: unknown): void {
+    const session = this.ensure(sessionId)
+    const modes = applyModeKey(session.modes, key, value)
+    if (modes === undefined || modes === session.modes) return
+    this.byId.set(sessionId, { ...session, modes })
+    this.emit({ kind: 'status', sessionId })
   }
 
   private applyTelemetryProjection(sessionId: SessionId, key: string, value: unknown): void {
@@ -419,6 +475,7 @@ export class DeckStore {
       queue: prev?.queue ?? [],
       unread: prev?.unread ?? 0,
       telemetry: prev?.telemetry ?? {},
+      modes: prev?.modes ?? {},
     }
     copyOptional(next, prev, frame)
     this.byId.set(frame.sessionId, next)
@@ -428,6 +485,7 @@ export class DeckStore {
   private ensure(id: SessionId): SessionState {
     const existing = this.byId.get(id)
     if (existing !== undefined) return existing
+    const known = this.modelSelections.get(id)
     const created: SessionState = {
       id,
       running: false,
@@ -439,6 +497,7 @@ export class DeckStore {
       queue: [],
       unread: 0,
       telemetry: {},
+      modes: known === undefined ? {} : { model: known },
     }
     this.byId.set(id, created)
     this.emit({ kind: 'sessions' })
@@ -525,8 +584,11 @@ function titleFromEventData(data: unknown): string | undefined {
 function copyOptional(
   next: SessionState,
   prev: SessionState | undefined,
-  src: { cwd?: string; origin?: 'subagent'; parentSessionId?: SessionId; title?: string },
+  src: { cwd?: string; origin?: 'subagent'; parentSessionId?: SessionId; title?: string; agentPreset?: string },
 ): void {
+  // The preset id rides on session.list and host/session-added, and is the only
+  // mode the host volunteers without being asked.
+  if (src.agentPreset !== undefined) next.modes = { ...next.modes, agentPreset: src.agentPreset }
   if (src.cwd !== undefined) next.cwd = src.cwd
   else if (prev?.cwd !== undefined) next.cwd = prev.cwd
   if (src.origin !== undefined) next.origin = src.origin
@@ -539,6 +601,48 @@ function copyOptional(
   if (prev?.pendingQuestion !== undefined) next.pendingQuestion = prev.pendingQuestion
   if (prev?.lastError !== undefined) next.lastError = prev.lastError
   if (prev?.telemetry !== undefined) next.telemetry = prev.telemetry
+}
+
+/** `undefined` = malformed, so the previous cell keeps serving the header. */
+function applyModeKey(current: SessionModes, key: string, value: unknown): SessionModes | undefined {
+  if (key === 'permissions') {
+    const permissions = parsePermissions(value)
+    if (permissions === undefined) return undefined
+    if (samePermissions(current.permissions, permissions)) return current
+    return { ...current, permissions }
+  }
+  if (key === 'plan') {
+    const plan = parsePlan(value)
+    if (plan === undefined) return undefined
+    if (current.plan?.active === plan.active && current.plan.pending === plan.pending) return current
+    return { ...current, plan }
+  }
+  return undefined
+}
+
+function parsePermissions(value: unknown): PermissionsProjection | undefined {
+  if (!isPlainRecord(value)) return undefined
+  const { options, currentValue } = value
+  if (typeof currentValue !== 'string' || !Array.isArray(options)) return undefined
+  const parsed: { value: string; name: string }[] = []
+  for (const option of options) {
+    if (!isPlainRecord(option)) return undefined
+    if (typeof option.value !== 'string') return undefined
+    parsed.push({ value: option.value, name: typeof option.name === 'string' ? option.name : option.value })
+  }
+  return { options: parsed, currentValue }
+}
+
+function parsePlan(value: unknown): PlanProjection | undefined {
+  if (!isPlainRecord(value)) return undefined
+  const { active, pending } = value
+  if (typeof active !== 'boolean' || typeof pending !== 'boolean') return undefined
+  return { active, pending }
+}
+
+function samePermissions(a: PermissionsProjection | undefined, b: PermissionsProjection): boolean {
+  if (a === undefined || a.currentValue !== b.currentValue || a.options.length !== b.options.length) return false
+  return a.options.every((option, i) => option.value === b.options[i]?.value && option.name === b.options[i]?.name)
 }
 
 function applyTelemetryKey(

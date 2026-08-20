@@ -174,4 +174,35 @@ describe('input mouse', () => {
       { kind: 'right' },
     ])
   })
+
+  /**
+   * start() resumes the stream, so stop() has to release it. A pipe reaches EOF
+   * and lets the process go regardless; a real terminal never does, so skipping
+   * this left the app restoring the terminal on quit and then hanging with the
+   * user's shell wedged. Assert the release explicitly.
+   */
+  it('stop releases the stream so a live tty cannot hold the process open', () => {
+    const input = new Readable({ read() {} })
+    let paused = 0
+    let unreffed = 0
+    const original = input.pause.bind(input)
+    input.pause = () => { paused += 1; return original() }
+    ;(input as unknown as { unref: () => void }).unref = () => { unreffed += 1 }
+
+    const reader = new InputReader(input as unknown as NodeJS.ReadStream)
+    reader.start()
+    reader.stop()
+
+    assert.equal(paused, 1, 'stop() must pause the stream it resumed')
+    assert.equal(unreffed, 1, 'stop() must unref the handle so the loop can drain')
+    assert.equal(input.listenerCount('data'), 0, 'stop() must drop its data listener')
+  })
+
+  it('stop is idempotent and safe on a stream without pause/unref', () => {
+    const input = new Readable({ read() {} })
+    const reader = new InputReader(input as unknown as NodeJS.ReadStream)
+    reader.start()
+    reader.stop()
+    assert.doesNotThrow(() => reader.stop())
+  })
 })
