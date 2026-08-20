@@ -97,6 +97,32 @@ describe('emptyTranscript', () => {
   })
 })
 
+describe('plugin-sourced user messages', () => {
+  it('hides runtime-context and skills injections; keeps human input and sourceless imports', () => {
+    const { ev } = fixture()
+    let state = emptyTranscript()
+    state = applyEvent(state, ev('user/message', userMessage('real prompt'), { surfaceOp: 'append' }))
+    state = applyEvent(state, ev('user/message', {
+      role: 'user',
+      content: [{ type: 'text', text: '<system-reminder>skills catalog dump…</system-reminder>' }],
+      source: { kind: 'plugin', plugin: 'skill' },
+    }, { surfaceOp: 'append' }))
+    state = applyEvent(state, ev('user/message', {
+      role: 'user',
+      content: [{ type: 'text', text: 'runtime context snapshot' }],
+      source: { kind: 'plugin', plugin: 'context' },
+    }, { surfaceOp: 'append' }))
+    // Imported/legacy logs may carry no source at all; keep those.
+    state = applyEvent(state, ev('user/message', {
+      role: 'user',
+      content: [{ type: 'text', text: 'legacy import' }],
+    }, { surfaceOp: 'append' }))
+
+    const users = state.items.filter((item) => item.kind === 'user')
+    assert.deepEqual(users.map((item) => item.text), ['real prompt', 'legacy import'])
+  })
+})
+
 describe('idempotent replay', () => {
   it('applying a tail page then overlapping live frames does not duplicate content', () => {
     const { ev } = fixture()

@@ -258,6 +258,16 @@ function applyUserMessage(state: TranscriptState, event: SessionEvent): Transcri
   // original append-origin conversation the user already saw.
   if (isReplacementOp(event.surfaceOp)) return bumpSeq(state, event.seq)
 
+  // The harness injects plugin-sourced user-role messages every turn (runtime
+  // context snapshots, skills catalogs). They are model food, not conversation:
+  // rendering them buries what the human actually typed. MessageSourceMap in
+  // upstream packages/llm/llm/src/message.ts: human input is kind 'user';
+  // an absent source is tolerated for imported or older logs.
+  const data = asRecord(event.data)
+  const container = asRecord(data?.message) ?? data
+  const sourceKind = asRecord(container?.source)?.kind
+  if (typeof sourceKind === 'string' && sourceKind !== 'user') return bumpSeq(state, event.seq)
+
   const text = messageText(event.data)
   let items = appendItem(state.items, { kind: 'user', seq: event.seq, time: event.time, text })
   const turn = state.currentTurn ?? 0

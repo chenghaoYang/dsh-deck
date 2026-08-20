@@ -25,6 +25,7 @@
   "files": [
     "bin",
     "lib",
+    "LICENSE",
     "SPEC.md",
     "README.md"
   ],
@@ -35,7 +36,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --experimental-strip-types --test test/*.test.ts",
     "fake-llm": "node --experimental-strip-types src/dev/fake-llm.ts",
-    "preview": "node --experimental-strip-types src/dev/preview.ts"
+    "preview": "node --experimental-strip-types src/dev/preview.ts",
+    "e2e": "node --experimental-strip-types scripts/e2e.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.20.0",
