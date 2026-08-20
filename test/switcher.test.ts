@@ -168,9 +168,17 @@ describe('reduceSwitcher', () => {
     assert.equal(focused.id, 'beta')
   })
 
-  it('ctrl+x archives the highlighted id and stays open after entries update', () => {
+  it('Delete asks for confirmation, Escape backs out, and Enter archives', () => {
     const start = createSwitcher(catalog, 'beta')
-    const archived = reduceSwitcher(start, { kind: 'ctrl', char: 'x' })
+    const confirming = mustContinue(reduceSwitcher(start, { kind: 'delete' }))
+    assert.equal(confirming.stage, 'confirm-archive')
+    assert.equal(confirming.archiveId, 'beta')
+
+    const backedOut = mustContinue(reduceSwitcher(confirming, { kind: 'escape' }))
+    assert.equal(backedOut.stage, 'list')
+
+    const confirmed = mustContinue(reduceSwitcher(start, { kind: 'ctrl', char: 'd' }))
+    const archived = reduceSwitcher(confirmed, { kind: 'enter' })
     assert.equal(archived.kind, 'archive')
     if (archived.kind !== 'archive') return
     assert.equal(archived.id, 'beta')
@@ -190,7 +198,8 @@ describe('reduceSwitcher', () => {
   it('clamps the cursor when updateSwitcherEntries removes the last row', () => {
     const start = createSwitcher(catalog, 'gamma')
     assert.equal(start.cursor, 2)
-    const archived = reduceSwitcher(start, { kind: 'ctrl', char: 'x' })
+    const confirming = mustContinue(reduceSwitcher(start, { kind: 'ctrl', char: 'x' }))
+    const archived = reduceSwitcher(confirming, { kind: 'enter' })
     assert.equal(archived.kind, 'archive')
     if (archived.kind !== 'archive') return
     const refreshed = updateSwitcherEntries(
@@ -254,6 +263,9 @@ function paintAll(rect: Rect): BoundsTarget {
     { kind: 'char', char: '很长的中文标题'.repeat(8) },
   ]))
   renderSwitcher(target, rect, typed, theme, glyphs)
+
+  const confirming = mustContinue(reduceSwitcher(start, { kind: 'delete' }))
+  renderSwitcher(target, rect, confirming, theme, glyphs)
 
   const many: SwitcherEntry[] = []
   for (let i = 0; i < 24; i++) {

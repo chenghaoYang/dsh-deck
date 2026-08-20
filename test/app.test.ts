@@ -23,6 +23,7 @@ interface AppInternals {
   cursor: number
   openPicker(): Promise<void>
   maybeOpenCommandPalette(): Promise<void>
+  archiveSession(id: string): Promise<void>
   send(mode: 'queue' | 'steer'): Promise<void>
   onOverlayKey(overlay: unknown, key: Key): void
 }
@@ -221,5 +222,36 @@ describe('DeckApp slash commands', () => {
       payload: { args: { agentId: 'session-command', line: '/plan off', images: [] } },
     }])
     assert.equal(view.draft, '')
+  })
+})
+
+describe('DeckApp session management', () => {
+  it('archives the focused session, keeps its log, and focuses the next session', async () => {
+    const app = new DeckApp({ baseUrl: 'http://127.0.0.1:3080', cwd: process.cwd() })
+    const view = internals(app)
+    view.store.applySessionList([
+      { sessionId: 'archive-me', updatedAt: 2, running: false, blank: false },
+      { sessionId: 'keep-me', updatedAt: 1, running: false, blank: false },
+    ])
+    view.store.focus('archive-me')
+    const calls: { method: string; payload: unknown }[] = []
+    view.client.call = async (method, payload) => {
+      calls.push({ method, payload })
+      if (method === 'workspace.archiveSession') {
+        return { ok: true, value: { archivedSessionIds: ['archive-me'] } }
+      }
+      if (method === 'session.history') return { ok: true, value: { events: [], hasMore: false } }
+      if (method === 'session.models') return { ok: true, value: modelCatalog() }
+      throw new Error(`unexpected ${method}`)
+    }
+
+    await view.archiveSession('archive-me')
+
+    assert.equal(view.store.focusedId, 'keep-me')
+    assert.deepEqual(view.store.sessions.map((session) => session.id), ['keep-me'])
+    assert.deepEqual(calls[0], {
+      method: 'workspace.archiveSession',
+      payload: { sessionId: 'archive-me' },
+    })
   })
 })

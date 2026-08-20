@@ -91,11 +91,10 @@ const FRAME_INTERVAL_MS = 42
 const SPINNER_INTERVAL_MS = 90
 
 const KEY_HINTS = [
-  { key: 'tab', label: 'switch' },
+  { key: '/', label: 'commands' },
   { key: '^k', label: 'sessions' },
   { key: '^s', label: 'modes' },
   { key: '^n', label: 'new' },
-  { key: '^c', label: 'cancel' },
   { key: '^g', label: 'help' },
 ]
 
@@ -129,6 +128,7 @@ const DECK_COMMANDS: readonly SlashCommandEntry[] = [
   { name: 'permissions', description: 'Inspect or switch permission mode', action: 'modes' },
   { name: 'sessions', description: 'Search and switch sessions', action: 'sessions' },
   { name: 'resume', description: 'Resume an existing session', action: 'sessions' },
+  { name: 'archive', description: 'Open session manager and archive with Delete', action: 'sessions' },
   { name: 'clear', description: 'Clear the visible transcript', action: 'clear' },
   { name: 'rename', description: 'Rename the focused session', input: { hint: '<title>' }, action: 'rename' },
   { name: 'new', description: 'Start a new session', action: 'new' },
@@ -148,7 +148,7 @@ const BINDINGS = [
   { keys: 'enter', label: 'send (queues behind the running turn)' },
   { keys: 'alt+enter', label: 'send as steering, interrupting the turn' },
   { keys: 'tab', label: 'next session' },
-  { keys: 'ctrl+k', label: 'session switcher: type to filter, ^x archive, ^r rename' },
+  { keys: 'ctrl+k', label: 'session manager: search, Delete archive, ^r rename, ^n new' },
   { keys: 'alt+1 … alt+9', label: 'jump to a session' },
   { keys: 'mouse', label: 'click a session to focus it; drag in the transcript to select and copy; wheel scrolls' },
   { keys: 'shift+drag', label: 'bypass deck — the terminal\u2019s own selection, always available' },
@@ -658,16 +658,23 @@ export class DeckApp {
   }
 
   private async archiveSession(id: SessionId): Promise<void> {
+    const session = this.store.get(id)
+    const wasFocused = this.store.focusedId === id
     const result = await this.client.call('workspace.archiveSession', { sessionId: id })
     if (!result.ok) {
       this.notice(`archive failed: ${result.error.message}`, 'error')
       return
     }
     this.store.applyArchivedBaseline(result.value.archivedSessionIds)
+    if (wasFocused) {
+      const next = this.store.sessions.find((item) => item.id !== id)
+      if (next === undefined) await this.createSession()
+      else this.focus(next.id)
+    }
     if (this.overlay?.kind === 'switcher') {
       this.overlay = { kind: 'switcher', state: updateSwitcherEntries(this.overlay.state, this.switcherEntries()) }
     }
-    this.notice('archived', 'info')
+    this.notice(`archived ${session === undefined ? 'session' : `“${this.titleOf(session)}”`} · log kept on disk`, 'info')
     this.requestFrame()
   }
 
@@ -1432,6 +1439,12 @@ export class DeckApp {
         queue: focused.queue,
         ...retrying === undefined ? {} : { retrying: { count: retrying.count, ...retrying.reason === undefined ? {} : { reason: retrying.reason } } },
       })
+      if (lines.length === 0) {
+        lines = [
+          { spans: [{ text: 'No messages yet.', style: this.theme.subtle }] },
+          { spans: [{ text: '/ commands  ·  Ctrl+K sessions  ·  Ctrl+G help', style: this.theme.dim }] },
+        ]
+      }
     }
     const { maxScroll } = renderTranscript(this.screen, {
       rect: layout.transcript,
@@ -1671,7 +1684,13 @@ function mergeCommandCatalog(
 ): SlashCommandEntry[] {
   const out: SlashCommandEntry[] = []
   const seen = new Set<string>()
-  for (const command of [...locals, ...host]) {
+  const firstScreen = new Set(['model', 'modes', 'sessions', 'new'])
+  const ordered = [
+    ...locals.filter((command) => firstScreen.has(normalizedCommandName(command.name))),
+    ...host,
+    ...locals.filter((command) => !firstScreen.has(normalizedCommandName(command.name))),
+  ]
+  for (const command of ordered) {
     const name = normalizedCommandName(command.name)
     if (name.length === 0 || seen.has(name)) continue
     seen.add(name)

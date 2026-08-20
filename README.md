@@ -11,7 +11,7 @@ Electron — just `deck`.
 [![CI](https://github.com/chenghaoYang/dsh-deck/actions/workflows/ci.yml/badge.svg)](https://github.com/chenghaoYang/dsh-deck/actions/workflows/ci.yml)
 ![node](https://img.shields.io/badge/node-%3E%3D22.19-brightgreen)
 ![dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)
-![tests](https://img.shields.io/badge/tests-223%20passing-brightgreen)
+![tests](https://img.shields.io/badge/tests-224%20passing-brightgreen)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 ```
@@ -54,7 +54,7 @@ questions, and the telemetry projections nobody documented.
 <tr><td><b>Every dsh mode, one panel</b></td><td><code>ctrl+s</code>: model, reasoning effort, agent preset, permissions, plan mode, compaction.</td></tr>
 <tr><td><b>Actually interactive</b></td><td>Click to focus, drag to copy, wheel to scroll, <code>ctrl+k</code> to fuzzy-switch sessions.</td></tr>
 <tr><td><b>Terminal-native</b></td><td>Taskbar progress, desktop notifications, clickable file links, inline images, prompt marks — each capability-gated.</td></tr>
-<tr><td><b>Verified on a real terminal</b></td><td>223 unit tests, a protocol e2e, and a 29-step live run that drives the real binary on a real pty against a real model.</td></tr>
+<tr><td><b>Verified on a real terminal</b></td><td>224 unit tests, a protocol e2e, and a 29-step live run that drives the real binary on a real pty against a real model.</td></tr>
 </table>
 
 ## Why
@@ -273,7 +273,8 @@ command, so you can type "add tests" without triggering anything.
 | `ctrl+n` | new session |
 | `ctrl+s` | modes: model, agent preset, permission, plan, compact |
 | `ctrl+p` | model and reasoning effort |
-| `ctrl+k` | session switcher |
+| `ctrl+k` | session manager: search, archive, rename, or create |
+| `delete` / `ctrl+d` in session manager | confirm archive (conversation log is kept) |
 | `ctrl+f` | fork the session |
 | `ctrl+c` | cancel the running turn, or quit when idle |
 | `ctrl+d` | quit |
@@ -331,7 +332,7 @@ the focused session, so optional plugins appear without a Deck update. Use
 filter to the composer.
 
 Deck provides `/model`, `/effort`, `/modes`, `/preset`, `/permissions`,
-`/sessions`, `/resume`, `/new`, `/clear`, `/rename`, `/fork`, `/help`, and
+`/sessions`, `/resume`, `/archive`, `/new`, `/clear`, `/rename`, `/fork`, `/help`, and
 `/exit`. A standard dsh host currently adds commands such as `/compact`,
 `/export`, `/feedback`, `/goal`, `/permission`, and `/plan`; the palette always
 uses the host's live catalog rather than assuming they are installed.
@@ -346,8 +347,10 @@ The mouse works: click a sidebar session to focus it, scroll the transcript
 with the wheel, and drag to select text — the selection is copied on release,
 through the OS clipboard *and* OSC 52, so it survives both a strict terminal
 and an SSH hop. `shift+drag` always falls through to your terminal's native
-selection, and `ctrl+t` turns mouse capture off entirely. `ctrl+k` opens a
-fuzzy session switcher (type to filter, `^x` archive, `^r` rename, `^n` new).
+selection, and `ctrl+t` turns mouse capture off entirely. `ctrl+k` opens the
+session manager: type to filter, Delete/`^d` opens an archive confirmation,
+`^r` renames, and `^n` creates a session. Archiving hides the session from
+Deck but deliberately keeps its conversation log on disk.
 
 ### Environment
 
@@ -422,7 +425,7 @@ and you can run Deck and any of the above side by side against the same host.
 
 ## Status
 
-Early, but not untested. 223 unit tests, a protocol e2e against a real throwaway
+Early, but not untested. 224 unit tests, a protocol e2e against a real throwaway
 host, and a 29-step live run that drives the shipped binary on a real pty. Last
 verified against `dsh` 0.1.0-rc.7 and `thinkingmachines/inkling` on NVIDIA NIM.
 

@@ -21,8 +21,9 @@ import {
 
 const SEGMENTER = new Intl.Segmenter('en', { granularity: 'grapheme' })
 
-const LIST_FOOTER = '⏎ focus · ^x archive · ^r rename · ^n new · esc close'
+const LIST_FOOTER = '⏎ focus · del archive · ^r rename · ^n new · esc close'
 const RENAME_FOOTER = 'enter save · esc back'
+const ARCHIVE_FOOTER = 'enter archive · esc back'
 
 export interface SwitcherEntry {
   id: string
@@ -38,9 +39,10 @@ export interface SwitcherState {
   entries: readonly SwitcherEntry[]
   filter: string
   cursor: number
-  stage: 'list' | 'rename'
+  stage: 'list' | 'rename' | 'confirm-archive'
   renameId: string
   renameDraft: string
+  archiveId: string
 }
 
 export type SwitcherResult =
@@ -60,6 +62,7 @@ export function createSwitcher(entries: readonly SwitcherEntry[], focusedId?: st
     stage: 'list',
     renameId: '',
     renameDraft: '',
+    archiveId: '',
   }
 }
 
@@ -73,26 +76,37 @@ export function updateSwitcherEntries(
     next.renameId = ''
     next.renameDraft = ''
   }
+  if (state.stage === 'confirm-archive' && !entries.some((entry) => entry.id === state.archiveId)) {
+    next.stage = 'list'
+    next.archiveId = ''
+  }
   next.cursor = clampIndex(state.cursor, filteredEntries(next).length)
   return next
 }
 
 export function reduceSwitcher(state: SwitcherState, key: Key): SwitcherResult {
   if (state.stage === 'rename') return reduceRename(state, key)
+  if (state.stage === 'confirm-archive') return reduceArchive(state, key)
 
   if (key.kind === 'escape') return { kind: 'cancelled' }
   if (key.kind === 'ctrl' && key.char.toLowerCase() === 'n') return { kind: 'create' }
-  if (key.kind === 'ctrl' && key.char.toLowerCase() === 'x') {
-    const entry = highlighted(state)
-    if (entry === undefined) return { kind: 'continue', state }
-    return { kind: 'archive', id: entry.id, state }
-  }
   if (key.kind === 'ctrl' && key.char.toLowerCase() === 'r') {
     const entry = highlighted(state)
     if (entry === undefined) return { kind: 'continue', state }
     return {
       kind: 'continue',
       state: { ...state, stage: 'rename', renameId: entry.id, renameDraft: entry.title },
+    }
+  }
+  if (
+    key.kind === 'delete'
+    || (key.kind === 'ctrl' && ['d', 'x'].includes(key.char.toLowerCase()))
+  ) {
+    const entry = highlighted(state)
+    if (entry === undefined) return { kind: 'continue', state }
+    return {
+      kind: 'continue',
+      state: { ...state, stage: 'confirm-archive', archiveId: entry.id },
     }
   }
 
@@ -125,11 +139,20 @@ export function renderSwitcher(
 
   const boxW = Math.max(4, Math.min(rect.width, 64))
   const list = filteredEntries(state)
-  const rows = 1 + Math.max(1, list.length)
+  const rows = state.stage === 'confirm-archive' ? 2 : 1 + Math.max(1, list.length)
   const desiredH = Math.min(rect.height, Math.max(5, rows + 3))
   const panel = centerBox(rect, boxW, desiredH)
   const innerW = Math.max(0, panel.width - 2)
   const innerH = Math.max(0, panel.height - 2)
+  if (state.stage === 'confirm-archive') {
+    const entry = state.entries.find((item) => item.id === state.archiveId)
+    const body: OverlayLine[] = [
+      { spans: [{ text: truncate(`Archive “${entry?.title ?? state.archiveId}”?`, innerW), style: theme.warn }] },
+      { spans: [{ text: 'It disappears from Deck; its conversation log stays on disk.', style: theme.dim }] },
+    ]
+    paintPanel(target, rect, panel, theme, glyphs, 'archive session', body, ARCHIVE_FOOTER)
+    return
+  }
   const title = state.stage === 'rename' ? 'rename' : 'sessions'
   const footer = state.stage === 'rename' ? RENAME_FOOTER : LIST_FOOTER
 
@@ -171,6 +194,18 @@ function reduceRename(state: SwitcherState, key: Key): SwitcherResult {
   }
   if (key.kind !== 'enter') return { kind: 'continue', state }
   return { kind: 'rename', id: state.renameId, title: state.renameDraft }
+}
+
+function reduceArchive(state: SwitcherState, key: Key): SwitcherResult {
+  if (key.kind === 'escape') {
+    return { kind: 'continue', state: { ...state, stage: 'list', archiveId: '' } }
+  }
+  if (key.kind !== 'enter') return { kind: 'continue', state }
+  return {
+    kind: 'archive',
+    id: state.archiveId,
+    state: { ...state, stage: 'list', archiveId: '' },
+  }
 }
 
 function withFilter(state: SwitcherState, filter: string): SwitcherState {
