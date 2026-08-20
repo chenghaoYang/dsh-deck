@@ -24,14 +24,26 @@ export interface ComposerProps {
   busy: boolean
   theme: Theme
   glyphs: Glyphs
+  /** When set, the right-hand hint names the vim park state. */
+  vim?: 'insert' | 'normal'
 }
 
 /** Zero-width, non-space marker used only to locate the caret after wrapping. */
 const CARET_MARK = '\u2060'
 
+function busyHint(mode: 'queue' | 'steer', enter: string, optionEnter: string): string {
+  // Enter still queues and option-enter still steers regardless of `mode`;
+  // both stay visible so the user can pick either while a turn is running.
+  switch (mode) {
+    case 'steer':
+    case 'queue':
+      return `^c cancel · ${enter} queue · ${optionEnter} steer`
+  }
+}
+
 /** Returns the absolute cursor position the shell should park the terminal caret at. */
 export function renderComposer(target: RenderTarget, props: ComposerProps): { row: number; col: number } {
-  const { rect, draft, busy, theme } = props
+  const { rect, draft, busy, theme, glyphs, mode } = props
   clearRect(target, rect, theme.base)
   const fallback = { row: Math.max(1, rect.row), col: Math.max(1, rect.col) }
   if (rect.width <= 0 || rect.height <= 0) return fallback
@@ -39,14 +51,19 @@ export function renderComposer(target: RenderTarget, props: ComposerProps): { ro
   const ascii = process.env.DECK_ASCII === '1'
   const enter = ascii ? 'ret' : '⏎'
   const optionEnter = ascii ? 'alt+ret' : '⌥⏎'
-  const modeText = busy ? `${enter} queue · ${optionEnter} steer` : `${enter} send`
+  const modeText = props.vim === 'normal'
+    ? 'NORMAL'
+    : busy ? busyHint(mode, enter, optionEnter) : `${enter} send`
   const modeW = stringWidth(modeText)
-  const modeStyle = busy ? theme.accent : theme.dim
+  const modeStyle = props.vim === 'normal' ? theme.accent : busy ? theme.accent : theme.dim
+  const modeReserve = modeW > 0 && modeW < rect.width ? modeW + 1 : 0
 
-  const wrapWidth = Math.max(1, rect.width)
-  const lines = wrapLines(draft, wrapWidth)
+  const prompt = `${glyphs.arrow} `
+  const wrapWidth = Math.max(1, rect.width - modeReserve)
+
+  const lines = wrapLines(prompt + draft, wrapWidth)
   const cur = Math.max(0, Math.min(props.cursor, codePointLength(draft)))
-  const prefix = codePointSlice(draft, 0, cur)
+  const prefix = prompt + codePointSlice(draft, 0, cur)
   const suffix = codePointSlice(draft, cur)
   const markedLines = wrapLines(prefix + CARET_MARK + suffix, wrapWidth)
   const markedLine = Math.max(0, markedLines.findIndex((line) => line.includes(CARET_MARK)))
@@ -61,11 +78,9 @@ export function renderComposer(target: RenderTarget, props: ComposerProps): { ro
   if (start > maxStart) start = maxStart
 
   const view = lines.slice(start, start + rect.height)
-  const modeReserve = modeW > 0 && modeW < rect.width ? modeW + 1 : 0
   for (let i = 0; i < view.length; i++) {
     const raw = view[i] ?? ''
-    const budget = i === 0 && modeReserve > 0 ? rect.width - modeReserve : rect.width
-    const text = clipToWidth(raw, budget).text
+    const text = clipToWidth(raw, wrapWidth).text
     if (text.length > 0) target.put(rect.row + i, rect.col, text, theme.text)
   }
 
@@ -74,7 +89,7 @@ export function renderComposer(target: RenderTarget, props: ComposerProps): { ro
   }
 
   const visRow = Math.max(0, Math.min(caretLine - start, rect.height - 1))
-  const maxCol = rect.col + rect.width - 1
+  const maxCol = Math.min(rect.col + wrapWidth - 1, rect.col + rect.width - 1)
   const col = Math.max(rect.col, Math.min(rect.col + caretOff, maxCol))
   return { row: rect.row + visRow, col }
 }

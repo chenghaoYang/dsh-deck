@@ -14,6 +14,7 @@ import {
   setTitle,
 } from './ansi.ts'
 import type { TerminalCapabilities } from './capabilities.ts'
+import { fileHref } from './uri.ts'
 
 /** Kitty graphics: base64 payload bytes per APC chunk (Kitty spec + Ghostty parser). */
 export const KITTY_CHUNK = 4096
@@ -104,7 +105,7 @@ export class TerminalIntegration {
           ? `${path}:${line}`
           : path
     if (!this.#caps.hyperlinks) return sanitizeOscPayload(display)
-    return hyperlink(fileUri(path, line), display)
+    return hyperlink(fileHref(path, line), display)
   }
 
   /**
@@ -154,23 +155,6 @@ export class TerminalIntegration {
       // degrade — never throw out of a notification or title write
     }
   }
-}
-
-function fileUri(path: string, line?: number): string {
-  const tmpl = process.env.DECK_EDITOR_URI
-  if (tmpl !== undefined && tmpl.length > 0) {
-    return tmpl.replaceAll('{path}', path).replaceAll('{line}', String(line ?? 1))
-  }
-  const abs = path.startsWith('/') || /^[A-Za-z]:[\\/]/.test(path) ? path : `${process.cwd()}/${path}`
-  const href = pathToFileUrl(abs)
-  return line !== undefined ? `${href}#L${line}` : href
-}
-
-/** file:// URL without importing node:url (keeps this file Node-builtin only, obvious). */
-function pathToFileUrl(abs: string): string {
-  const normalized = abs.replace(/\\/g, '/')
-  const prefixed = normalized.startsWith('/') ? normalized : `/${normalized}`
-  return `file://${prefixed.split('/').map(encodeURIComponent).join('/')}`
 }
 
 export function encodeKittyPng(

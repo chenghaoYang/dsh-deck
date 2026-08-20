@@ -11,13 +11,15 @@ import type { Glyphs } from './theme.ts'
 import type { Rect } from './layout.ts'
 
 export interface RenderTarget {
-  put(row: number, col: number, text: string, style?: string): void
+  put(row: number, col: number, text: string, style?: string, link?: string): void
   fill(row: number, col: number, width: number, height: number, char?: string, style?: string): void
 }
 
 export interface Span {
   text: string
   style: string
+  /** OSC 8 href; omit when the span is not a hyperlink. */
+  link?: string
 }
 
 export interface RenderedLine {
@@ -80,7 +82,8 @@ export function fitSpans(spans: readonly Span[], columns: number): Span[] {
       if (stringWidth(span.text) > 0) break
       continue
     }
-    out.push({ text: clipped.text, style: span.style })
+    if (span.link === undefined) out.push({ text: clipped.text, style: span.style })
+    else out.push({ text: clipped.text, style: span.style, link: span.link })
     used += clipped.width
   }
   return out
@@ -154,7 +157,7 @@ export function paintLine(
       if (stringWidth(span.text) > 0) break
       continue
     }
-    target.put(row, col + x, clipped.text, span.style)
+    target.put(row, col + x, clipped.text, span.style, span.link)
     x += clipped.width
   }
 }
@@ -177,4 +180,18 @@ export function codePointSlice(text: string, start: number, end?: number): strin
 
 export function codePointLength(text: string): number {
   return [...text].length
+}
+
+/** Case-insensitive subsequence match used by palettes (slash, sessions, models). */
+export function isSubsequence(query: string, haystack: string): boolean {
+  if (query.length === 0) return true
+  const needle = [...query.toLocaleLowerCase()]
+  let i = 0
+  for (const ch of haystack.toLocaleLowerCase()) {
+    if (ch === needle[i]) {
+      i++
+      if (i >= needle.length) return true
+    }
+  }
+  return false
 }

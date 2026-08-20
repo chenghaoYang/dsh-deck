@@ -57,6 +57,7 @@ const glyphs: Glyphs = {
 
 class BoundsTarget implements RenderTarget {
   readonly puts: { row: number; col: number; text: string; style: string }[] = []
+  readonly fills: { row: number; col: number; width: number; height: number; style: string }[] = []
   readonly rect: Rect
 
   constructor(rect: Rect) {
@@ -81,7 +82,7 @@ class BoundsTarget implements RenderTarget {
     this.puts.push({ row, col, text, style })
   }
 
-  fill(row: number, col: number, width: number, height: number, _char = ' ', _style = ''): void {
+  fill(row: number, col: number, width: number, height: number, _char = ' ', style = ''): void {
     if (width === 0 || height === 0) return
     const { rect } = this
     if (width < 0 || height < 0) throw new Error('fill negative size')
@@ -91,6 +92,7 @@ class BoundsTarget implements RenderTarget {
     if (col < rect.col || col + width > rect.col + rect.width) {
       throw new Error(`fill col ${col}+${width} outside ${rect.col}..${rect.col + rect.width - 1}`)
     }
+    this.fills.push({ row, col, width, height, style })
   }
 }
 
@@ -176,9 +178,6 @@ const catalog: ModeRow[] = [
     value: 'off',
     options: [opt('off', { current: true }), opt('on')],
   }),
-  row('compact', {
-    value: 'compact older history',
-  }),
 ]
 
 describe('reduceModes', () => {
@@ -201,14 +200,14 @@ describe('reduceModes', () => {
       { kind: 'down' },
       { kind: 'down' },
     ]))
-    assert.equal(end.cursor, 4)
+    assert.equal(end.cursor, 3)
 
     const typed = mustContinue(feed(end, [
       { kind: 'char', char: '1' },
       { kind: 'char', char: 'a' },
       { kind: 'char', char: '2' },
     ]))
-    assert.equal(typed.cursor, 4)
+    assert.equal(typed.cursor, 3)
     assert.equal(typed.level, 'rows')
     assert.equal(typed, end)
   })
@@ -271,27 +270,20 @@ describe('reduceModes', () => {
   })
 
   it('enter on an action row returns fired', () => {
-    const start = createModes(catalog)
-    const onCompact = mustContinue(feed(start, [
-      { kind: 'down' },
-      { kind: 'down' },
-      { kind: 'down' },
-      { kind: 'down' },
-    ]))
-    assert.equal(onCompact.cursor, 4)
-    const fired = reduceModes(onCompact, { kind: 'enter' })
+    const action = createModes([row('model', { value: 'host default' })])
+    const fired = reduceModes(action, { kind: 'enter' })
     assert.equal(fired.kind, 'fired')
     if (fired.kind !== 'fired') return
-    assert.equal(fired.row, 'compact')
+    assert.equal(fired.row, 'model')
     assert.equal(fired.state.level, 'rows')
 
     const emptyOpts = createModes([
-      row('compact', { value: 'now', options: [] }),
+      row('model', { value: 'host default', options: [] }),
     ])
     const also = reduceModes(emptyOpts, { kind: 'enter' })
     assert.equal(also.kind, 'fired')
     if (also.kind !== 'fired') return
-    assert.equal(also.row, 'compact')
+    assert.equal(also.row, 'model')
   })
 
   it('disabled rows and disabled options are inert', () => {
@@ -346,7 +338,7 @@ describe('updateModesRows', () => {
 
     const reordered = updateModesRows(onPermission, [
       catalog[2]!,
-      catalog[4]!,
+      catalog[3]!,
       catalog[0]!,
     ])
     assert.equal(reordered.cursor, 0)
@@ -365,7 +357,7 @@ describe('updateModesRows', () => {
       { kind: 'down' },
       { kind: 'down' },
     ]))
-    assert.equal(onLast.cursor, 4)
+    assert.equal(onLast.cursor, 3)
     const clamped = updateModesRows(onLast, [catalog[0]!, catalog[1]!])
     assert.equal(clamped.cursor, 1)
   })
@@ -423,6 +415,30 @@ describe('modes render bounds', () => {
       })
     })
   }
+
+  it('fills only the panel, not the outer transcript rect', () => {
+    const rect: Rect = { row: 1, col: 1, width: 48, height: 16 }
+    const target = new BoundsTarget(rect)
+    renderModes(target, rect, createModes(catalog), theme, glyphs)
+    assert.ok(
+      !target.fills.some(
+        (fill) =>
+          fill.style === 'DIM' &&
+          fill.row === rect.row &&
+          fill.col === rect.col &&
+          fill.width === rect.width &&
+          fill.height === rect.height,
+      ),
+    )
+    const panel = target.fills.find((fill) => fill.style === 'BASE')
+    assert.ok(panel !== undefined)
+    if (panel === undefined) return
+    assert.ok(panel.height < rect.height, 'panel should float inside the transcript')
+    for (const put of target.puts) {
+      assert.ok(put.row >= panel.row && put.row < panel.row + panel.height)
+      assert.ok(put.col >= panel.col && put.col < panel.col + panel.width)
+    }
+  })
 
   it('does not throw on a tiny or empty rect', () => {
     for (const rect of [
@@ -535,7 +551,6 @@ describe('modes CJK safety', () => {
       }),
       row('permission', { value: 'read-only' }),
       row('plan', { value: 'off' }),
-      row('compact', { value: 'compact older history now' }),
     ]
     const state = createModes(rows)
     for (const columns of [80, 100] as const) {

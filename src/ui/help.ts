@@ -14,7 +14,6 @@ export function renderHelp(
   theme: Theme,
   bindings: readonly { keys: string; label: string }[],
 ): void {
-  clearRect(target, rect, theme.dim)
   if (rect.width <= 0 || rect.height <= 0) return
 
   const box = boxChars()
@@ -31,16 +30,32 @@ export function renderHelp(
 
   clearRect(target, { row, col, width: boxW, height: boxH }, theme.base)
 
-  const title = ' help '
-  const titleW = stringWidth(title)
-  let top = `${box.tl}${repeatToWidth(box.h, innerW)}${box.tr}`
-  if (titleW + 2 <= innerW) {
-    const rest = innerW - titleW
-    const left = 1
-    const right = rest - left
-    top = `${box.tl}${repeatToWidth(box.h, left)}${title}${repeatToWidth(box.h, right)}${box.tr}`
+  const labeled = ' help '
+  const titleW = stringWidth(labeled)
+  target.put(row, col, box.tl, theme.border)
+  if (boxW >= 2) target.put(row, col + boxW - 1, box.tr, theme.border)
+  if (innerW > 0) {
+    if (titleW + 2 <= innerW) {
+      const rest = innerW - titleW
+      const left = 1
+      const right = rest - left
+      let x = col + 1
+      if (left > 0) {
+        target.put(row, x, repeatToWidth(box.h, left), theme.border)
+        x += left
+      }
+      target.put(row, x, labeled, theme.accent)
+      x += titleW
+      if (right > 0) target.put(row, x, repeatToWidth(box.h, right), theme.border)
+    } else {
+      const cut = truncate('help', innerW)
+      const cutW = stringWidth(cut)
+      if (cutW > 0) target.put(row, col + 1, cut, theme.accent)
+      if (cutW < innerW) {
+        target.put(row, col + 1 + cutW, repeatToWidth(box.h, innerW - cutW), theme.border)
+      }
+    }
   }
-  target.put(row, col, clipToWidth(top, boxW).text, theme.border)
 
   const bodyRows = boxH - 2
   for (let i = 0; i < bodyRows; i++) {

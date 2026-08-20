@@ -13,17 +13,16 @@ import type { Rect } from './layout.ts'
 import {
   type RenderTarget,
   type Span,
-  clearRect,
-  clipToWidth,
-  paintLine,
-  repeatToWidth,
+  isSubsequence,
+  spinnerGlyph,
 } from './render.ts'
+import { paintFloatingPanel, type OverlayLine } from './overlay.ts'
 
 const SEGMENTER = new Intl.Segmenter('en', { granularity: 'grapheme' })
 
-const LIST_FOOTER = '⏎ focus · del archive · ^r rename · ^n new · esc close'
-const RENAME_FOOTER = 'enter save · esc back'
-const ARCHIVE_FOOTER = 'enter archive · esc back'
+const LIST_FOOTER = '⏎ focus · ⌫/^d archive · ^r rename · ^n new · esc close'
+const RENAME_FOOTER = '⏎ save · esc back'
+const ARCHIVE_FOOTER = '⏎ archive · esc back'
 
 export interface SwitcherEntry {
   id: string
@@ -99,7 +98,9 @@ export function reduceSwitcher(state: SwitcherState, key: Key): SwitcherResult {
     }
   }
   if (
-    key.kind === 'delete'
+    (key.kind === 'backspace' && state.filter.length === 0)
+    ||
+    (key.kind === 'delete' && state.filter.length === 0)
     || (key.kind === 'ctrl' && ['d', 'x'].includes(key.char.toLowerCase()))
   ) {
     const entry = highlighted(state)
@@ -112,6 +113,7 @@ export function reduceSwitcher(state: SwitcherState, key: Key): SwitcherResult {
 
   if (key.kind === 'paste') return { kind: 'continue', state: withFilter(state, state.filter + key.text) }
   if (key.kind === 'backspace') return { kind: 'continue', state: withFilter(state, popGrapheme(state.filter)) }
+  if (key.kind === 'delete') return { kind: 'continue', state }
   if (isPrintableChar(key)) return { kind: 'continue', state: withFilter(state, state.filter + key.char) }
 
   const list = filteredEntries(state)
@@ -134,6 +136,7 @@ export function renderSwitcher(
   state: SwitcherState,
   theme: Theme,
   glyphs: Glyphs,
+  spinnerFrame = 0,
 ): void {
   if (rect.width <= 0 || rect.height <= 0) return
 
@@ -150,7 +153,7 @@ export function renderSwitcher(
       { spans: [{ text: truncate(`Archive “${entry?.title ?? state.archiveId}”?`, innerW), style: theme.warn }] },
       { spans: [{ text: 'It disappears from Deck; its conversation log stays on disk.', style: theme.dim }] },
     ]
-    paintPanel(target, rect, panel, theme, glyphs, 'archive session', body, ARCHIVE_FOOTER)
+    paintFloatingPanel(target, panel, theme, glyphs, 'archive session', body, ARCHIVE_FOOTER)
     return
   }
   const title = state.stage === 'rename' ? 'rename' : 'sessions'
@@ -169,11 +172,11 @@ export function renderSwitcher(
     if (entry === undefined) break
     const selected = start + i === cursor
     body.push({
-      spans: rowSpans(entry, selected, innerW, state, theme, glyphs, now),
+      spans: rowSpans(entry, selected, innerW, state, theme, glyphs, now, spinnerFrame),
     })
   }
 
-  paintPanel(target, rect, panel, theme, glyphs, title, body, footer)
+  paintFloatingPanel(target, panel, theme, glyphs, title, body, footer)
 }
 
 function reduceRename(state: SwitcherState, key: Key): SwitcherResult {
@@ -233,28 +236,16 @@ function cwdBasename(cwd: string | undefined): string {
   return parts[parts.length - 1] ?? ''
 }
 
-function isSubsequence(query: string, haystack: string): boolean {
-  if (query.length === 0) return true
-  const needle = [...query.toLocaleLowerCase()]
-  let i = 0
-  for (const ch of haystack.toLocaleLowerCase()) {
-    if (ch === needle[i]) {
-      i++
-      if (i >= needle.length) return true
-    }
-  }
-  return false
-}
-
 function statusGlyph(
   entry: SwitcherEntry,
   glyphs: Glyphs,
   theme: Theme,
+  spinnerFrame: number,
 ): { glyph: string; style: string } {
   if (entry.blocked) return { glyph: glyphs.approve, style: theme.warn }
   if (entry.running) {
-    const spin = glyphs.running[0]
-    return { glyph: spin ?? glyphs.idle, style: theme.running }
+    const spin = spinnerGlyph(glyphs, spinnerFrame)
+    return { glyph: spin.length > 0 ? spin : glyphs.idle, style: theme.running }
   }
   return { glyph: glyphs.idle, style: theme.dim }
 }
@@ -282,12 +273,13 @@ function rowSpans(
   theme: Theme,
   glyphs: Glyphs,
   now: number,
+  spinnerFrame: number,
 ): Span[] {
   if (innerW <= 0) return []
 
   const renaming = state.stage === 'rename' && entry.id === state.renameId
   const title = renaming ? state.renameDraft : entry.title
-  const { glyph, style: glyphStyle } = statusGlyph(entry, glyphs, theme)
+  const { glyph, style: glyphStyle } = statusGlyph(entry, glyphs, theme, spinnerFrame)
   const mark = selected ? `${glyphs.arrow} ` : '  '
   const badge = unreadBadge(entry.unread)
   const age = formatAge(entry.updatedAt, now)
@@ -359,14 +351,6 @@ function isPrintableChar(key: Key): key is { kind: 'char'; char: string } {
   return key.kind === 'char' && key.char.length > 0
 }
 
-// ---------------------------------------------------------------------------
-// Panel chrome (overlay.ts / help.ts: centered box, title on the top rule)
-// ---------------------------------------------------------------------------
-
-interface OverlayLine {
-  spans: Span[]
-}
-
 function centerBox(rect: Rect, width: number, height: number): Rect {
   const w = Math.max(0, Math.min(width, Math.max(0, rect.width)))
   const h = Math.max(0, Math.min(height, Math.max(0, rect.height)))
@@ -375,146 +359,5 @@ function centerBox(rect: Rect, width: number, height: number): Rect {
     col: rect.col + Math.floor((Math.max(0, rect.width) - w) / 2),
     width: w,
     height: h,
-  }
-}
-
-function putGlyph(
-  target: RenderTarget,
-  row: number,
-  col: number,
-  ch: string,
-  style: string,
-): void {
-  const clipped = clipToWidth(ch, 1)
-  if (clipped.text.length === 0) return
-  target.put(row, col, clipped.text, style)
-}
-
-function paintTopRule(
-  target: RenderTarget,
-  panel: Rect,
-  title: string,
-  theme: Theme,
-  glyphs: Glyphs,
-): void {
-  const { row, col, width } = panel
-  if (width <= 0) return
-  putGlyph(target, row, col, glyphs.corner.tl, theme.border)
-  if (width === 1) return
-  putGlyph(target, row, col + width - 1, glyphs.corner.tr, theme.border)
-  const innerW = width - 2
-  if (innerW <= 0) return
-
-  const labeled = title.length > 0 ? ` ${title} ` : ''
-  const titleW = stringWidth(labeled)
-  if (labeled.length > 0 && titleW + 2 <= innerW) {
-    const rest = innerW - titleW
-    const left = 1
-    const right = rest - left
-    let x = col + 1
-    if (left > 0) {
-      target.put(row, x, repeatToWidth(glyphs.hline, left), theme.border)
-      x += left
-    }
-    target.put(row, x, labeled, theme.accent)
-    x += titleW
-    if (right > 0) target.put(row, x, repeatToWidth(glyphs.hline, right), theme.border)
-    return
-  }
-  if (labeled.length > 0 && titleW <= innerW) {
-    const pad = innerW - titleW
-    const left = Math.floor(pad / 2)
-    const right = pad - left
-    let x = col + 1
-    if (left > 0) {
-      target.put(row, x, repeatToWidth(glyphs.hline, left), theme.border)
-      x += left
-    }
-    target.put(row, x, labeled, theme.accent)
-    x += titleW
-    if (right > 0) target.put(row, x, repeatToWidth(glyphs.hline, right), theme.border)
-    return
-  }
-  const cut = truncate(title, innerW)
-  const cutW = stringWidth(cut)
-  if (cutW > 0) target.put(row, col + 1, cut, theme.accent)
-  if (cutW < innerW) {
-    target.put(row, col + 1 + cutW, repeatToWidth(glyphs.hline, innerW - cutW), theme.border)
-  }
-}
-
-function paintBottomRule(
-  target: RenderTarget,
-  panel: Rect,
-  theme: Theme,
-  glyphs: Glyphs,
-): void {
-  const { width } = panel
-  if (width <= 0 || panel.height < 2) return
-  const row = panel.row + panel.height - 1
-  putGlyph(target, row, panel.col, glyphs.corner.bl, theme.border)
-  if (width === 1) return
-  putGlyph(target, row, panel.col + width - 1, glyphs.corner.br, theme.border)
-  const innerW = width - 2
-  if (innerW > 0) {
-    target.put(row, panel.col + 1, repeatToWidth(glyphs.hline, innerW), theme.border)
-  }
-}
-
-function paintSideRules(
-  target: RenderTarget,
-  row: number,
-  panel: Rect,
-  theme: Theme,
-  glyphs: Glyphs,
-): void {
-  if (panel.width <= 0) return
-  putGlyph(target, row, panel.col, glyphs.vline, theme.border)
-  if (panel.width >= 2) {
-    putGlyph(target, row, panel.col + panel.width - 1, glyphs.vline, theme.border)
-  }
-}
-
-function paintInner(
-  target: RenderTarget,
-  row: number,
-  panel: Rect,
-  spans: readonly Span[],
-): void {
-  const innerW = panel.width - 2
-  if (innerW <= 0) return
-  paintLine(target, row, panel.col + 1, innerW, { spans: [...spans] })
-}
-
-function paintPanel(
-  target: RenderTarget,
-  rect: Rect,
-  panel: Rect,
-  theme: Theme,
-  glyphs: Glyphs,
-  title: string,
-  body: readonly OverlayLine[],
-  footer: string,
-): void {
-  if (rect.width > 0 && rect.height > 0) clearRect(target, rect, theme.dim)
-  if (panel.width <= 0 || panel.height <= 0) return
-  clearRect(target, panel, theme.base)
-  paintTopRule(target, panel, title, theme, glyphs)
-  paintBottomRule(target, panel, theme, glyphs)
-
-  const innerH = Math.max(0, panel.height - 2)
-  const innerW = Math.max(0, panel.width - 2)
-  const footerRow = innerH >= 1 ? innerH - 1 : -1
-  for (let i = 0; i < innerH; i++) {
-    const row = panel.row + 1 + i
-    paintSideRules(target, row, panel, theme, glyphs)
-    if (i === footerRow) {
-      if (innerW > 0) {
-        paintInner(target, row, panel, [{ text: truncate(footer, innerW), style: theme.dim }])
-      }
-      continue
-    }
-    const line = body[i]
-    if (line !== undefined) paintInner(target, row, panel, line.spans)
   }
 }

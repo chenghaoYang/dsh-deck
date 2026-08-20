@@ -215,6 +215,38 @@ export interface SessionSummary {
   agentPreset?: string
 }
 
+export interface SessionSearchItem {
+  sessionId: SessionId
+  snippet: string
+}
+
+export interface WorkspaceView {
+  workspaceId: string
+  path: string
+  title: string
+  sessionIds: SessionId[]
+  createdAt: string
+  updatedAt: string
+}
+
+export interface SkillEntry {
+  name: string
+  description: string
+  whenToUse?: string
+  modelInvocable: boolean
+}
+
+export type SubagentListEntry =
+  | {
+    kind: 'child'
+    id: SessionId
+    mode: 'one-shot' | 'continuable'
+    activity: 'running' | 'inactive'
+    hasChildren: boolean
+    label?: string
+  }
+  | { kind: 'diagnostic'; id: SessionId; reason: 'corrupt' | 'unsupported' | 'unavailable' }
+
 export interface HistoryEntry {
   event: SessionEvent
   view?: ToolEventView
@@ -227,8 +259,8 @@ export type PromptContentPart =
 export interface HostDescription {
   version: string
   cwd: string
-  provider: string
-  model: string
+  provider?: string
+  model?: string
   attachedSessions: number
   home: string
   canOpenPath: boolean
@@ -339,6 +371,7 @@ export interface PlanProjection {
 export interface RpcMethods {
   'host.describe': { payload: {}; value: HostDescription }
   'session.list': { payload: { cursor?: string }; value: { items: SessionSummary[] } }
+  'session.search': { payload: { query: string }; value: { items: SessionSearchItem[]; hasMore: boolean } }
   'session.create': {
     payload: { cwd?: string; sessionId?: SessionId; agentPreset?: string }
     value: { sessionId: SessionId; agentPreset?: string }
@@ -363,10 +396,53 @@ export interface RpcMethods {
     payload: { sessionId: SessionId; attachmentId: string }
     value: { attachment: unknown; data: string }
   }
-  'session.updateQueue': { payload: { sessionId: SessionId; itemId: MessageId; action: unknown }; value: { accepted: true } }
+  'session.updateQueue': {
+    payload: {
+      sessionId: SessionId
+      itemId: MessageId
+      action:
+        | { kind: 'edit'; content: PromptContentPart[] }
+        | { kind: 'remove' }
+        | { kind: 'steer' }
+    }
+    value: { accepted: true }
+  }
   /** Archived sessions stay in session.list; clients hide them via this registry. Verified live. */
-  'workspace.list': { payload: {}; value: { items: unknown[]; archivedSessionIds: SessionId[] } }
+  'workspace.list': { payload: {}; value: { items: WorkspaceView[]; archivedSessionIds: SessionId[] } }
   'workspace.archiveSession': { payload: { sessionId: SessionId }; value: { archivedSessionIds: SessionId[] } }
+  'skill.list': { payload: { sessionId: SessionId }; value: { skills: SkillEntry[] } }
+  'subagent.list': {
+    payload: { parentSessionId: SessionId }
+    value: { entries: SubagentListEntry[]; parentAvailable: boolean }
+  }
+  'subagent.history': {
+    payload: {
+      parentSessionId: SessionId
+      childSessionId: SessionId
+      mode: 'one-shot' | 'continuable'
+      beforeSeq?: number
+      maxMessages?: number
+    }
+    value: {
+      events: HistoryEntry[]
+      hasMore: boolean
+      projections?: { asOfSeq: number; values: Record<string, unknown> }
+    }
+  }
+  'subagent.prompt': {
+    payload: {
+      parentSessionId: SessionId
+      childSessionId: SessionId
+      mode: 'continuable'
+      content: PromptContentPart[]
+      clientTimeZone?: string
+    }
+    value: { messageId: MessageId }
+  }
+  'subagent.interrupt': {
+    payload: { parentSessionId: SessionId; childSessionId: SessionId; mode: 'continuable' }
+    value: { accepted: true }
+  }
   'agentPreset.list': {
     payload: {}
     value: { presets: AgentPresetEntry[]; authorable: boolean; hasDocument: boolean }

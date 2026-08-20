@@ -378,12 +378,14 @@ describe('approvals, host frames, reset', () => {
 
   it('applies host status, errors, and removal', async () => {
     const store = new DeckStore()
-    const added: HostFrame = { type: 'host/session-added', sessionId: 's', blank: false }
+    const added: HostFrame = { type: 'host/session-added', sessionId: 's', blank: true }
     store.applyHost(added, 'r')
     store.applyHost({ type: 'host/session-status', sessionId: 's', running: true }, 'r')
     store.applyHost({ type: 'host/agent-error', sessionId: 's', message: 'llm down' }, 'r')
     await flush()
     assert.equal(store.get('s')?.running, true)
+    assert.equal(store.get('s')?.blank, false)
+    assert.equal(store.sessions.some((session) => session.id === 's'), true)
     assert.equal(store.get('s')?.lastError, 'llm down')
 
     store.applyHost({ type: 'host/session-removed', sessionId: 's' }, 'r')

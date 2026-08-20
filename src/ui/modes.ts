@@ -1,6 +1,6 @@
 /**
  * Per-session modes panel. Pure reducer + paint — the app shell owns RPC
- * (model / agent / permission / plan / compact) and the store.
+ * (model / agent / permission / plan) and the store.
  *
  * Switching a mode keeps the panel open: the shell pushes a new projection
  * through updateModesRows so the row value refreshes in place.
@@ -13,21 +13,18 @@ import type { Rect } from './layout.ts'
 import {
   type RenderTarget,
   type Span,
-  clearRect,
-  clipToWidth,
   fitSpans,
-  paintLine,
   padTo,
-  repeatToWidth,
   spansWidth,
 } from './render.ts'
+import { paintFloatingPanel, type OverlayLine } from './overlay.ts'
 
 const PANEL_MAX_WIDTH = 64
 const ROWS_FOOTER = '↑↓ move · ⏎ change · esc close'
 const OPTIONS_FOOTER = '↑↓ move · ⏎ select · esc back'
 
 /** Which dsh mode a row switches. */
-export type ModeRowId = 'model' | 'agent' | 'permission' | 'plan' | 'compact'
+export type ModeRowId = 'model' | 'agent' | 'permission' | 'plan'
 
 export interface ModeOption {
   value: string
@@ -130,7 +127,7 @@ export function renderModes(
     body.push(line)
   }
 
-  paintPanel(target, rect, panel, theme, glyphs, title, body, footer)
+  paintFloatingPanel(target, panel, theme, glyphs, title, body, footer)
 }
 
 /** Maps a click to what it hit, so the panel is mouse-operable. */
@@ -413,14 +410,6 @@ function clampIndex(index: number, length: number): number {
   return index
 }
 
-// ---------------------------------------------------------------------------
-// Panel chrome (overlay.ts / help.ts: centered box, title on the top rule)
-// ---------------------------------------------------------------------------
-
-interface OverlayLine {
-  spans: Span[]
-}
-
 function centerBox(rect: Rect, width: number, height: number): Rect {
   const w = Math.max(0, Math.min(width, Math.max(0, rect.width)))
   const h = Math.max(0, Math.min(height, Math.max(0, rect.height)))
@@ -429,146 +418,5 @@ function centerBox(rect: Rect, width: number, height: number): Rect {
     col: rect.col + Math.floor((Math.max(0, rect.width) - w) / 2),
     width: w,
     height: h,
-  }
-}
-
-function putGlyph(
-  target: RenderTarget,
-  row: number,
-  col: number,
-  ch: string,
-  style: string,
-): void {
-  const clipped = clipToWidth(ch, 1)
-  if (clipped.text.length === 0) return
-  target.put(row, col, clipped.text, style)
-}
-
-function paintTopRule(
-  target: RenderTarget,
-  panel: Rect,
-  title: string,
-  theme: Theme,
-  glyphs: Glyphs,
-): void {
-  const { row, col, width } = panel
-  if (width <= 0) return
-  putGlyph(target, row, col, glyphs.corner.tl, theme.border)
-  if (width === 1) return
-  putGlyph(target, row, col + width - 1, glyphs.corner.tr, theme.border)
-  const innerW = width - 2
-  if (innerW <= 0) return
-
-  const labeled = stringWidth(title) > 0 ? ` ${title} ` : ''
-  const titleW = stringWidth(labeled)
-  if (titleW > 0 && titleW + 2 <= innerW) {
-    const rest = innerW - titleW
-    const left = 1
-    const right = rest - left
-    let x = col + 1
-    if (left > 0) {
-      target.put(row, x, repeatToWidth(glyphs.hline, left), theme.border)
-      x += left
-    }
-    target.put(row, x, labeled, theme.accent)
-    x += titleW
-    if (right > 0) target.put(row, x, repeatToWidth(glyphs.hline, right), theme.border)
-    return
-  }
-  if (titleW > 0 && titleW <= innerW) {
-    const pad = innerW - titleW
-    const left = Math.floor(pad / 2)
-    const right = pad - left
-    let x = col + 1
-    if (left > 0) {
-      target.put(row, x, repeatToWidth(glyphs.hline, left), theme.border)
-      x += left
-    }
-    target.put(row, x, labeled, theme.accent)
-    x += titleW
-    if (right > 0) target.put(row, x, repeatToWidth(glyphs.hline, right), theme.border)
-    return
-  }
-  const cut = truncate(title, innerW)
-  const cutW = stringWidth(cut)
-  if (cutW > 0) target.put(row, col + 1, cut, theme.accent)
-  if (cutW < innerW) {
-    target.put(row, col + 1 + cutW, repeatToWidth(glyphs.hline, innerW - cutW), theme.border)
-  }
-}
-
-function paintBottomRule(
-  target: RenderTarget,
-  panel: Rect,
-  theme: Theme,
-  glyphs: Glyphs,
-): void {
-  const { width } = panel
-  if (width <= 0 || panel.height < 2) return
-  const row = panel.row + panel.height - 1
-  putGlyph(target, row, panel.col, glyphs.corner.bl, theme.border)
-  if (width === 1) return
-  putGlyph(target, row, panel.col + width - 1, glyphs.corner.br, theme.border)
-  const innerW = width - 2
-  if (innerW > 0) {
-    target.put(row, panel.col + 1, repeatToWidth(glyphs.hline, innerW), theme.border)
-  }
-}
-
-function paintSideRules(
-  target: RenderTarget,
-  row: number,
-  panel: Rect,
-  theme: Theme,
-  glyphs: Glyphs,
-): void {
-  if (panel.width <= 0) return
-  putGlyph(target, row, panel.col, glyphs.vline, theme.border)
-  if (panel.width >= 2) {
-    putGlyph(target, row, panel.col + panel.width - 1, glyphs.vline, theme.border)
-  }
-}
-
-function paintInner(
-  target: RenderTarget,
-  row: number,
-  panel: Rect,
-  spans: readonly Span[],
-): void {
-  const innerW = panel.width - 2
-  if (innerW <= 0) return
-  paintLine(target, row, panel.col + 1, innerW, { spans: padSpansToWidth(spans, innerW) })
-}
-
-function paintPanel(
-  target: RenderTarget,
-  rect: Rect,
-  panel: Rect,
-  theme: Theme,
-  glyphs: Glyphs,
-  title: string,
-  body: readonly OverlayLine[],
-  footer: string,
-): void {
-  if (rect.width > 0 && rect.height > 0) clearRect(target, rect, theme.dim)
-  if (panel.width <= 0 || panel.height <= 0) return
-  clearRect(target, panel, theme.base)
-  paintTopRule(target, panel, title, theme, glyphs)
-  paintBottomRule(target, panel, theme, glyphs)
-
-  const innerH = Math.max(0, panel.height - 2)
-  const innerW = Math.max(0, panel.width - 2)
-  const footerRow = innerH >= 1 ? innerH - 1 : -1
-  for (let i = 0; i < innerH; i++) {
-    const row = panel.row + 1 + i
-    paintSideRules(target, row, panel, theme, glyphs)
-    if (i === footerRow) {
-      if (innerW > 0) {
-        paintInner(target, row, panel, [{ text: truncate(footer, innerW), style: theme.dim }])
-      }
-      continue
-    }
-    const line = body[i]
-    if (line !== undefined) paintInner(target, row, panel, line.spans)
   }
 }

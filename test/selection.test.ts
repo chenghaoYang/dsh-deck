@@ -97,7 +97,8 @@ describe('screenToPoint', () => {
         }
         assert.ok(point !== undefined, `painted row ${row} scroll=${scroll}`)
         const expected = lineText(lines[point.line] ?? { spans: [] })
-        assert.equal(text, expected, `row ${row} scroll=${scroll} mapped to line ${point.line}`)
+        const content = text.replace(/[│▎|]$/u, '')
+        assert.equal(content, expected, `row ${row} scroll=${scroll} mapped to line ${point.line}`)
         assert.equal(point.column, 0)
       }
     }

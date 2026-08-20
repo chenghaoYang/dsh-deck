@@ -24,12 +24,13 @@
   },
   "files": [
     "bin",
-    "lib",
-    "src",
-    "docs",
+    "lib/src",
+    "!lib/src/dev",
+    "docs/screenshots/dsh-deck-ghostty.png",
     "LICENSE",
     "SPEC.md",
-    "README.md"
+    "README.md",
+    "README.zh-CN.md"
   ],
   "//": "scripts/ is intentionally not published: pty-bridge.py and verify-live.mjs are development tools, not runtime dependencies.",
   "scripts": {

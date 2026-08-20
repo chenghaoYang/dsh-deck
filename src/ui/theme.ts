@@ -6,10 +6,11 @@
  * terminals without truecolor, and `NO_COLOR` removes styling entirely.
  */
 
-import { rgb, sgr } from '../term/ansi.ts'
+import { rgb, rgbBg, sgr } from '../term/ansi.ts'
 import type { TerminalCapabilities } from '../term/capabilities.ts'
 
 export interface Theme {
+  /** Fill style for chrome (truecolor includes a real background). */
   base: string
   dim: string
   subtle: string
@@ -44,9 +45,19 @@ const MOCHA = {
   lavender: '#b4befe',
 }
 
-function hex(value: string): string {
+function hexParts(value: string): { r: number; g: number; b: number } {
   const n = Number.parseInt(value.slice(1), 16)
-  return rgb((n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff)
+  return { r: (n >> 16) & 0xff, g: (n >> 8) & 0xff, b: n & 0xff }
+}
+
+function hex(value: string): string {
+  const { r, g, b } = hexParts(value)
+  return rgb(r, g, b)
+}
+
+function hexBg(value: string): string {
+  const { r, g, b } = hexParts(value)
+  return rgbBg(r, g, b)
 }
 
 const RESET = sgr(0)
@@ -97,22 +108,26 @@ function noTheme(): Theme {
 export function createTheme(caps: TerminalCapabilities, env: NodeJS.ProcessEnv = process.env): Theme {
   if (env.NO_COLOR !== undefined && env.NO_COLOR !== '') return noTheme()
   if (env.DECK_THEME === 'plain' || !caps.trueColor) return plainTheme()
+  // Pair every foreground with the mocha background so a RESET+style cell
+  // keeps the product surface instead of flashing the terminal default.
+  const bg = hexBg(MOCHA.base)
+  const ink = (fg: string): string => bg + hex(fg)
   return {
-    base: hex(MOCHA.base),
-    dim: hex(MOCHA.overlay1),
-    subtle: hex(MOCHA.subtext0),
-    text: hex(MOCHA.text),
-    accent: hex(MOCHA.mauve),
-    user: hex(MOCHA.blue),
-    assistant: hex(MOCHA.text),
-    reasoning: hex(MOCHA.overlay1),
-    tool: hex(MOCHA.peach),
-    ok: hex(MOCHA.green),
-    warn: hex(MOCHA.yellow),
-    error: hex(MOCHA.red),
-    running: hex(MOCHA.sapphire),
-    selected: hex(MOCHA.lavender),
-    border: hex(MOCHA.surface1),
+    base: bg,
+    dim: ink(MOCHA.overlay1),
+    subtle: ink(MOCHA.subtext0),
+    text: ink(MOCHA.text),
+    accent: ink(MOCHA.mauve),
+    user: ink(MOCHA.blue),
+    assistant: ink(MOCHA.text),
+    reasoning: ink(MOCHA.overlay1),
+    tool: ink(MOCHA.peach),
+    ok: ink(MOCHA.green),
+    warn: ink(MOCHA.yellow),
+    error: ink(MOCHA.red),
+    running: ink(MOCHA.sapphire),
+    selected: hexBg(MOCHA.surface1) + hex(MOCHA.text),
+    border: ink(MOCHA.surface1),
     reset: RESET,
   }
 }

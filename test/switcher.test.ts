@@ -54,6 +54,7 @@ const glyphs: Glyphs = {
 
 class BoundsTarget implements RenderTarget {
   readonly puts: { row: number; col: number; text: string; style: string }[] = []
+  readonly fills: { row: number; col: number; width: number; height: number; style: string }[] = []
   readonly rect: Rect
 
   constructor(rect: Rect) {
@@ -78,7 +79,7 @@ class BoundsTarget implements RenderTarget {
     this.puts.push({ row, col, text, style })
   }
 
-  fill(row: number, col: number, width: number, height: number, _char = ' ', _style = ''): void {
+  fill(row: number, col: number, width: number, height: number, _char = ' ', style = ''): void {
     if (width === 0 || height === 0) return
     const { rect } = this
     if (width < 0 || height < 0) throw new Error('fill negative size')
@@ -88,6 +89,7 @@ class BoundsTarget implements RenderTarget {
     if (col < rect.col || col + width > rect.col + rect.width) {
       throw new Error(`fill col ${col}+${width} outside ${rect.col}..${rect.col + rect.width - 1}`)
     }
+    this.fills.push({ row, col, width, height, style })
   }
 }
 
@@ -170,6 +172,10 @@ describe('reduceSwitcher', () => {
 
   it('Delete asks for confirmation, Escape backs out, and Enter archives', () => {
     const start = createSwitcher(catalog, 'beta')
+    const macDelete = mustContinue(reduceSwitcher(start, { kind: 'backspace' }))
+    assert.equal(macDelete.stage, 'confirm-archive')
+    assert.equal(macDelete.archiveId, 'beta')
+
     const confirming = mustContinue(reduceSwitcher(start, { kind: 'delete' }))
     assert.equal(confirming.stage, 'confirm-archive')
     assert.equal(confirming.archiveId, 'beta')
@@ -177,7 +183,19 @@ describe('reduceSwitcher', () => {
     const backedOut = mustContinue(reduceSwitcher(confirming, { kind: 'escape' }))
     assert.equal(backedOut.stage, 'list')
 
+    const filtering = mustContinue(feed(start, [{ kind: 'char', char: 'b' }]))
+    const editedFilter = mustContinue(reduceSwitcher(filtering, { kind: 'backspace' }))
+    assert.equal(editedFilter.filter, '')
+    assert.equal(editedFilter.stage, 'list')
+    const forwardDelete = mustContinue(reduceSwitcher(filtering, { kind: 'delete' }))
+    assert.equal(forwardDelete.filter, 'b')
+    assert.equal(forwardDelete.stage, 'list')
+
     const confirmed = mustContinue(reduceSwitcher(start, { kind: 'ctrl', char: 'd' }))
+    const modifiedReturn = reduceSwitcher(confirmed, {
+      kind: 'modified-enter', shift: false, alt: false, ctrl: false, super: true,
+    })
+    assert.equal(modifiedReturn.kind, 'continue')
     const archived = reduceSwitcher(confirmed, { kind: 'enter' })
     assert.equal(archived.kind, 'archive')
     if (archived.kind !== 'archive') return
@@ -295,4 +313,39 @@ describe('switcher render bounds', () => {
       })
     })
   }
+
+  it('fills only the panel, not the outer transcript rect', () => {
+    const rect: Rect = { row: 1, col: 1, width: 80, height: 24 }
+    const target = new BoundsTarget(rect)
+    renderSwitcher(target, rect, createSwitcher(catalog, 'beta'), theme, glyphs)
+    assert.ok(
+      !target.fills.some(
+        (fill) =>
+          fill.style === 'DIM' &&
+          fill.width === rect.width &&
+          fill.height === rect.height,
+      ),
+    )
+    const panel = target.fills.find((fill) => fill.style === 'BASE')
+    assert.ok(panel !== undefined)
+    if (panel === undefined) return
+    assert.ok(panel.width < rect.width && panel.height < rect.height)
+    for (const put of target.puts) {
+      assert.ok(put.row >= panel.row && put.row < panel.row + panel.height)
+      assert.ok(put.col >= panel.col && put.col < panel.col + panel.width)
+    }
+  })
+
+  it('animates running entries from spinnerFrame', () => {
+    const rect: Rect = { row: 1, col: 1, width: 48, height: 16 }
+    const start = createSwitcher(catalog, 'beta')
+    const frame0 = new BoundsTarget(rect)
+    renderSwitcher(frame0, rect, start, theme, glyphs, 0)
+    const frame1 = new BoundsTarget(rect)
+    renderSwitcher(frame1, rect, start, theme, glyphs, 1)
+    const spin0 = glyphs.running[0]
+    const spin1 = glyphs.running[1]
+    assert.ok(spin0 !== undefined && frame0.puts.some((p) => p.text.includes(spin0)))
+    assert.ok(spin1 !== undefined && frame1.puts.some((p) => p.text.includes(spin1)))
+  })
 })

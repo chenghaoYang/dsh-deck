@@ -11,19 +11,30 @@ import {
   createCommandPalette,
   createPickerOverlay,
   createQuestionOverlay,
+  createQueueOverlay,
+  createRewindOverlay,
   layoutImageOverlay,
   reduceCommandPalette,
   reducePickerOverlay,
   reduceQuestionOverlay,
+  reduceQueueOverlay,
+  reduceRewindOverlay,
   renderCommandPalette,
   renderImageOverlayChrome,
+  renderInfoOverlay,
   renderPickerOverlay,
   renderQuestionOverlay,
+  renderQueueOverlay,
+  renderRewindOverlay,
   type PickerModel,
   type PickerOverlayResult,
   type PickerOverlayState,
   type QuestionOverlayResult,
   type QuestionOverlayState,
+  type QueueOverlayResult,
+  type QueueOverlayState,
+  type RewindOverlayResult,
+  type RewindOverlayState,
 } from '../src/ui/overlay.ts'
 
 const theme: Theme = {
@@ -64,6 +75,7 @@ const glyphs: Glyphs = {
 
 class BoundsTarget implements RenderTarget {
   readonly puts: { row: number; col: number; text: string; style: string }[] = []
+  readonly fills: { row: number; col: number; width: number; height: number; style: string }[] = []
   readonly rect: Rect
 
   constructor(rect: Rect) {
@@ -88,7 +100,7 @@ class BoundsTarget implements RenderTarget {
     this.puts.push({ row, col, text, style })
   }
 
-  fill(row: number, col: number, width: number, height: number, _char = ' ', _style = ''): void {
+  fill(row: number, col: number, width: number, height: number, _char = ' ', style = ''): void {
     if (width === 0 || height === 0) return
     const { rect } = this
     if (width < 0 || height < 0) throw new Error('fill negative size')
@@ -98,6 +110,28 @@ class BoundsTarget implements RenderTarget {
     if (col < rect.col || col + width > rect.col + rect.width) {
       throw new Error(`fill col ${col}+${width} outside ${rect.col}..${rect.col + rect.width - 1}`)
     }
+    this.fills.push({ row, col, width, height, style })
+  }
+}
+
+function assertFloatingPanel(target: BoundsTarget, rect: Rect): void {
+  assert.ok(
+    !target.fills.some(
+      (fill) =>
+        fill.style === 'DIM' &&
+        fill.row === rect.row &&
+        fill.col === rect.col &&
+        fill.width === rect.width &&
+        fill.height === rect.height,
+    ),
+    'overlay must not wipe the outer transcript rect',
+  )
+  const panel = target.fills.find((fill) => fill.style === 'BASE')
+  assert.ok(panel !== undefined, 'expected the panel interior to be filled with theme.base')
+  if (panel === undefined) return
+  for (const put of target.puts) {
+    assert.ok(put.row >= panel.row && put.row < panel.row + panel.height, `put row ${put.row} outside panel`)
+    assert.ok(put.col >= panel.col && put.col < panel.col + panel.width, `put col ${put.col} outside panel`)
   }
 }
 
@@ -108,6 +142,18 @@ function mustContinueQ(result: QuestionOverlayResult): QuestionOverlayState {
 }
 
 function mustContinueP(result: PickerOverlayResult): PickerOverlayState {
+  assert.equal(result.kind, 'continue')
+  if (result.kind !== 'continue') throw new Error('expected continue')
+  return result.state
+}
+
+function mustContinueR(result: RewindOverlayResult): RewindOverlayState {
+  assert.equal(result.kind, 'continue')
+  if (result.kind !== 'continue') throw new Error('expected continue')
+  return result.state
+}
+
+function mustContinueQueue(result: QueueOverlayResult): QueueOverlayState {
   assert.equal(result.kind, 'continue')
   if (result.kind !== 'continue') throw new Error('expected continue')
   return result.state
@@ -304,6 +350,12 @@ describe('slash command palette', () => {
     { name: 'plan', description: 'Toggle plan mode' },
   ]
 
+  it('filters by subsequence, so mdl matches /model', () => {
+    const result = reduceCommandPalette(createCommandPalette(commands, 'mdl'), { kind: 'enter' })
+    assert.equal(result.kind, 'run')
+    if (result.kind === 'run') assert.equal(result.command.name, 'model')
+  })
+
   it('filters by prefix, moves, runs, completes, and restores input on escape', () => {
     let state = createCommandPalette(commands, 'mo')
     let result = reduceCommandPalette(state, { kind: 'down' })
@@ -338,6 +390,108 @@ describe('slash command palette', () => {
     assert.ok(plain.includes('Switch permission'))
     const commandRows = target.puts.filter((put) => put.text.includes('/permission'))
     assert.ok(commandRows.every((put) => put.row >= rect.row + rect.height - 8))
+    assertFloatingPanel(target, rect)
+  })
+})
+
+describe('rewind overlay', () => {
+  const longPreview = '中文预览 '.repeat(20)
+  const turns = [
+    { seq: 1, turn: 1, preview: 'hello there' },
+    { seq: 4, turn: 2, preview: longPreview },
+    { seq: 9, turn: 3, preview: 'latest turn' },
+  ]
+
+  it('starts on the newest turn; enter picks seq; escape cancels', () => {
+    const start = createRewindOverlay(turns)
+    assert.equal(start.cursor, 2)
+    const up = mustContinueR(reduceRewindOverlay(start, { kind: 'up' }))
+    assert.equal(up.cursor, 1)
+    const picked = reduceRewindOverlay(up, { kind: 'enter' })
+    assert.equal(picked.kind, 'picked')
+    if (picked.kind === 'picked') assert.equal(picked.seq, 4)
+    assert.equal(reduceRewindOverlay(start, { kind: 'escape' }).kind, 'cancelled')
+  })
+
+  it('renders a floating panel with truncated previews and the fork footer', () => {
+    const rect: Rect = { row: 1, col: 1, width: 80, height: 24 }
+    const target = new BoundsTarget(rect)
+    renderRewindOverlay(target, rect, createRewindOverlay(turns), theme, glyphs)
+    const plain = target.puts.map((put) => put.text).join('')
+    assert.match(plain, /rewind/)
+    assert.match(plain, /fork here/)
+    assert.match(plain, /latest turn/)
+    assert.ok(!plain.includes(longPreview), 'full unwrapped preview must not be painted')
+    assertFloatingPanel(target, rect)
+  })
+})
+
+describe('queue overlay', () => {
+  const longPreview = '中文预览 '.repeat(20)
+  const items = [
+    { id: 'q1', placement: 'queued' as const, preview: 'hello there', text: 'hello there' },
+    { id: 'q2', placement: 'steering' as const, preview: longPreview, text: longPreview },
+    { id: 'q3', placement: 'queued' as const, preview: 'later', text: 'later' },
+  ]
+
+  it('create + enter starts edit; escape from edit returns to list; escape from list cancels', () => {
+    const start = createQueueOverlay(items)
+    assert.equal(start.cursor, 0)
+    assert.equal(start.stage, 'list')
+    const editing = mustContinueQueue(reduceQueueOverlay(start, { kind: 'enter' }))
+    assert.equal(editing.stage, 'edit')
+    assert.equal(editing.editDraft, 'hello there')
+    const back = mustContinueQueue(reduceQueueOverlay(editing, { kind: 'escape' }))
+    assert.equal(back.stage, 'list')
+    assert.equal(reduceQueueOverlay(back, { kind: 'escape' }).kind, 'cancelled')
+  })
+
+  it('d yields remove with the selected id', () => {
+    const start = createQueueOverlay(items)
+    const result = reduceQueueOverlay(start, { kind: 'char', char: 'd' })
+    assert.equal(result.kind, 'remove')
+    if (result.kind === 'remove') assert.equal(result.id, 'q1')
+  })
+
+  it('s yields steer', () => {
+    const start = createQueueOverlay(items)
+    const moved = mustContinueQueue(reduceQueueOverlay(start, { kind: 'down' }))
+    const result = reduceQueueOverlay(moved, { kind: 'char', char: 's' })
+    assert.equal(result.kind, 'steer')
+    if (result.kind === 'steer') assert.equal(result.id, 'q2')
+  })
+
+  it('edit then enter yields { kind: edit, text } containing the typed text', () => {
+    const start = createQueueOverlay(items)
+    const editing = mustContinueQueue(reduceQueueOverlay(start, { kind: 'enter' }))
+    const typed = mustContinueQueue(reduceQueueOverlay(editing, { kind: 'char', char: 'X' }))
+    const result = reduceQueueOverlay(typed, { kind: 'enter' })
+    assert.equal(result.kind, 'edit')
+    if (result.kind !== 'edit') return
+    assert.equal(result.id, 'q1')
+    assert.ok(result.text.includes('X'), `expected typed text in ${JSON.stringify(result.text)}`)
+  })
+
+  it('renders a floating panel with title, footer, and truncated previews', () => {
+    const rect: Rect = { row: 1, col: 1, width: 80, height: 24 }
+    const target = new BoundsTarget(rect)
+    renderQueueOverlay(target, rect, createQueueOverlay(items), theme, glyphs)
+    const plain = target.puts.map((put) => put.text).join('')
+    assert.match(plain, /queue/)
+    assert.match(plain, /⏎\/e edit · d remove · s steer · esc close/)
+    assert.match(plain, /hello there/)
+    assert.ok(!plain.includes(longPreview), 'full unwrapped preview must not be painted')
+    assertFloatingPanel(target, rect)
+  })
+
+  it('empty list still renders a floating panel', () => {
+    const rect: Rect = { row: 1, col: 1, width: 80, height: 24 }
+    const target = new BoundsTarget(rect)
+    renderQueueOverlay(target, rect, createQueueOverlay([]), theme, glyphs)
+    const plain = target.puts.map((put) => put.text).join('')
+    assert.match(plain, /queue/)
+    assert.match(plain, /no pending messages/)
+    assertFloatingPanel(target, rect)
   })
 })
 
@@ -419,6 +573,23 @@ describe('reducePickerOverlay', () => {
     assert.equal(models.stage, 'models')
     assert.equal(reducePickerOverlay(models, { kind: 'escape' }).kind, 'cancelled')
   })
+
+  it('makes the two-step model and effort flow explicit', () => {
+    const rect: Rect = { row: 1, col: 1, width: 80, height: 24 }
+    const modelsTarget = new BoundsTarget(rect)
+    const models = createPickerOverlay(pickerModels)
+    renderPickerOverlay(modelsTarget, rect, models, theme, glyphs)
+    const modelsText = modelsTarget.puts.map((put) => put.text).join('')
+    assert.match(modelsText, /models · step 1\/2/)
+    assert.match(modelsText, /⏎ next/)
+
+    const effortTarget = new BoundsTarget(rect)
+    const effort = mustContinueP(reducePickerOverlay(models, { kind: 'enter' }))
+    renderPickerOverlay(effortTarget, rect, effort, theme, glyphs)
+    const effortText = effortTarget.puts.map((put) => put.text).join('')
+    assert.match(effortText, /effort · step 2\/2/)
+    assert.match(effortText, /⏎ apply model/)
+  })
 })
 
 function paintAllOverlays(rect: Rect): BoundsTarget {
@@ -469,6 +640,19 @@ function paintAllOverlays(rect: Rect): BoundsTarget {
     { name: 'model', description: 'Switch model', action: 'model' },
     { name: 'permission', description: 'Switch permission', input: { hint: '<preset>' } },
   ]), theme, glyphs)
+  renderInfoOverlay(target, rect, {
+    title: 'status',
+    lines: ['Project: demo', 'Session: sample', 'Model: nvidia/inkling', 'Context: 42%'],
+  }, theme, glyphs)
+  renderRewindOverlay(target, rect, createRewindOverlay([
+    { seq: 1, turn: 1, preview: 'hello' },
+    { seq: 2, turn: 2, preview: '中文'.repeat(40) },
+  ]), theme, glyphs)
+  renderQueueOverlay(target, rect, createQueueOverlay([
+    { id: 'a', placement: 'queued', preview: 'hello', text: 'hello' },
+    { id: 'b', placement: 'steering', preview: '中文'.repeat(40), text: '中文'.repeat(40) },
+  ]), theme, glyphs)
+  renderQueueOverlay(target, rect, createQueueOverlay([]), theme, glyphs)
 
   const fitted = layoutImageOverlay(rect, '示意图'.repeat(20), {
     preferredColumns: 80,

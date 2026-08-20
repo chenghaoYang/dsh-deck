@@ -137,7 +137,9 @@ type HostStopRegistrar = (stop: () => void) => void
 
 async function startHost(port: number, cwd: string, registerStop?: HostStopRegistrar): Promise<SpawnedHost> {
   const logPath = join(tmpdir(), `deck-dsh-${String(port)}.log`)
-  const log = createWriteStream(logPath, { flags: 'a' })
+  // The path is stable per port, so keep only the current launch. Appending
+  // makes a fresh failure look like several unrelated dsh errors at once.
+  const log = createWriteStream(logPath, { flags: 'w' })
   const child = spawn('dsh', ['web', '--no-open', '--port', String(port)], {
     cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -223,7 +225,7 @@ async function main(): Promise<void> {
         spawned = await startHost(args.port, args.cwd, (stop) => { stopSpawnedHost = stop })
       } catch (error) {
         process.stderr.write(`deck: ${error instanceof Error ? error.message : String(error)}\n`)
-        process.stderr.write('deck: is `dsh` installed? try `npm i -g @deepseek-ai/dsh`\n')
+        process.stderr.write('deck: is `dsh` installed? try `npm i -g @deepseek-ai/dsh@next`\n')
         process.exitCode = 1
         return
       }

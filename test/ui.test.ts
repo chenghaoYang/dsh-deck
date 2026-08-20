@@ -75,21 +75,25 @@ const bindings = [
 ] as const
 
 class BoundsTarget implements RenderTarget {
-  readonly puts: { row: number; col: number; text: string; style: string }[] = []
+  readonly puts: { row: number; col: number; text: string; style: string; link?: string }[] = []
   readonly rect: Rect
 
   constructor(rect: Rect) {
     this.rect = rect
   }
 
-  put(row: number, col: number, text: string, style = ''): void {
+  put(row: number, col: number, text: string, style = '', link?: string): void {
     const width = stringWidth(text)
     const { rect } = this
     if (row < rect.row || row >= rect.row + rect.height) {
       throw new Error(`put row ${row} outside ${rect.row}..${rect.row + rect.height - 1}`)
     }
+    const entry =
+      link === undefined || link.length === 0
+        ? { row, col, text, style }
+        : { row, col, text, style, link }
     if (width === 0) {
-      this.puts.push({ row, col, text, style })
+      this.puts.push(entry)
       return
     }
     if (col < rect.col || col + width > rect.col + rect.width) {
@@ -97,7 +101,7 @@ class BoundsTarget implements RenderTarget {
         `put col ${col}+${width} outside ${rect.col}..${rect.col + rect.width - 1} (${JSON.stringify(text)})`,
       )
     }
-    this.puts.push({ row, col, text, style })
+    this.puts.push(entry)
   }
 
   fill(row: number, col: number, width: number, height: number, _char = ' ', _style = ''): void {
@@ -615,6 +619,170 @@ describe('layoutTranscript', () => {
     assert.ok(queuedAt >= 0)
     assert.ok(queuedAt < lines.length - 1)
   })
+
+  it('collapses a tool card to a single name+status line without dumping results', () => {
+    const result = Array.from({ length: 8 }, (_, i) => `result line ${i}`).join('\n')
+    const lines = layoutTranscript(
+      [
+        {
+          kind: 'tool',
+          seq: 1,
+          turn: 1,
+          step: 0,
+          call: toolCall('ok', {
+            resultText: result,
+            startedAt: 0,
+            endedAt: 1500,
+          }),
+        },
+      ],
+      { width: 48, theme, glyphs, spinnerFrame: 0, expandTools: false },
+    )
+    assert.equal(lines.length, 1)
+    const first = lines[0]
+    assert.ok(first)
+    const plain = lineText(first)
+    assert.match(plain, /bash/)
+    assert.match(plain, /ok/)
+    assert.doesNotMatch(plain, /result line 0/)
+    assert.doesNotMatch(plain, /result line 6/)
+    assert.ok(stringWidth(plain) <= 48)
+  })
+
+  it('expandTools still shows tool result lines', () => {
+    const result = Array.from({ length: 4 }, (_, i) => `result line ${i}`).join('\n')
+    const lines = layoutTranscript(
+      [
+        {
+          kind: 'tool',
+          seq: 1,
+          turn: 1,
+          step: 0,
+          call: toolCall('ok', { resultText: result }),
+        },
+      ],
+      { width: 48, theme, glyphs, spinnerFrame: 0, expandTools: true },
+    )
+    const plain = lines.map(lineText).join('\n')
+    assert.ok(lines.length > 2)
+    assert.match(plain, /result line 0/)
+    assert.match(plain, /result line 3/)
+    for (const line of lines) assert.ok(stringWidth(lineText(line)) <= 48)
+  })
+
+  it('expandReasoning false keeps finished thought collapsed even when tools expand', () => {
+    const text = ['alpha', 'bravo', 'charlie', 'delta'].join('\n')
+    const lines = layoutTranscript(
+      [{ kind: 'reasoning', seq: 1, turn: 1, step: 0, text, streaming: false }],
+      { width: 40, theme, glyphs, spinnerFrame: 0, expandTools: true, expandReasoning: false },
+    )
+    assert.equal(lines.length, 1)
+    const first = lines[0]
+    assert.ok(first)
+    assert.match(lineText(first), /thought for \d+ lines/)
+    assert.doesNotMatch(lineText(first), /alpha/)
+  })
+
+  it('renders lightweight markdown in assistant text within width', () => {
+    const lines = layoutTranscript(
+      [
+        {
+          kind: 'assistant',
+          seq: 1,
+          turn: 1,
+          step: 0,
+          text: '# Title here\n- list item\n1. numbered\nthis is **bold** and `code`',
+          streaming: false,
+        },
+      ],
+      { width: 32, theme, glyphs, spinnerFrame: 0, expandTools: false },
+    )
+    const plain = lines.map(lineText).join('\n')
+    assert.match(plain, /Title here/)
+    assert.match(plain, /list item/)
+    assert.match(plain, /numbered/)
+    assert.match(plain, /bold/)
+    assert.match(plain, /code/)
+    assert.doesNotMatch(plain, /\*\*bold\*\*/)
+    assert.ok(lines.some((line) => line.spans.some((span) => span.style === theme.accent && span.text.includes('Title'))))
+    assert.ok(lines.some((line) => line.spans.some((span) => span.style === theme.accent && span.text.includes('bold'))))
+    assert.ok(lines.some((line) => line.spans.some((span) => span.style === theme.subtle && span.text.includes('code'))))
+    for (const line of lines) {
+      assert.ok(stringWidth(lineText(line)) <= 32, JSON.stringify(lineText(line)))
+    }
+  })
+
+  it('does not reuse a stale spinner glyph on a streaming item', () => {
+    const item: TranscriptItem = {
+      kind: 'assistant',
+      seq: 1,
+      turn: 1,
+      step: 0,
+      text: 'hello',
+      streaming: true,
+    }
+    const a = layoutTranscript([item], { width: 40, theme, glyphs, spinnerFrame: 0, expandTools: false })
+    const b = layoutTranscript([item], { width: 40, theme, glyphs, spinnerFrame: 1, expandTools: false })
+    const lastA = a[a.length - 1]
+    const lastB = b[b.length - 1]
+    assert.ok(lastA)
+    assert.ok(lastB)
+    assert.match(lineText(lastA), /⠋/)
+    assert.match(lineText(lastB), /⠙/)
+  })
+
+  it('puts a file:// link on a tool path summary span only', () => {
+    const lines = layoutTranscript(
+      [
+        {
+          kind: 'tool',
+          seq: 1,
+          turn: 1,
+          step: 0,
+          call: toolCall('ok', {
+            name: 'read',
+            args: { path: 'src/ui/app.ts' },
+            argumentsRaw: '{"path":"src/ui/app.ts"}',
+          }),
+        },
+      ],
+      { width: 48, theme, glyphs, spinnerFrame: 0, expandTools: false },
+    )
+    const linked = lines.flatMap((line) => line.spans).filter((span) => span.link !== undefined)
+    assert.equal(linked.length, 1)
+    const href = linked[0]?.link
+    assert.ok(href)
+    assert.match(href, /file:\/\//)
+    assert.match(href, /app\.ts/)
+    assert.match(linked[0]!.text, /app\.ts/)
+    for (const span of lines.flatMap((line) => line.spans)) {
+      if (span.link !== undefined) continue
+      assert.doesNotMatch(span.text, /app\.ts/)
+    }
+  })
+
+  it('does not link a bash command summary', () => {
+    const lines = layoutTranscript(
+      [
+        {
+          kind: 'tool',
+          seq: 1,
+          turn: 1,
+          step: 0,
+          call: toolCall('ok', {
+            name: 'bash',
+            args: { command: 'ls src' },
+            argumentsRaw: '{"command":"ls src"}',
+          }),
+        },
+      ],
+      { width: 48, theme, glyphs, spinnerFrame: 0, expandTools: false },
+    )
+    for (const span of lines.flatMap((line) => line.spans)) {
+      assert.equal(span.link, undefined)
+    }
+    assert.match(lines.map(lineText).join('\n'), /ls src/)
+  })
 })
 
 describe('sidebar', () => {
@@ -644,13 +812,36 @@ describe('sidebar', () => {
     const target = new BoundsTarget(rect)
     renderSidebar(target, {
       rect,
-      sessions: [session('queued', { pendingApprovals: [first, second] })],
+      sessions: [session('queued', { pendingApprovals: [first, second], unread: 5 })],
       focusedId: 'queued',
       theme,
       glyphs,
       spinnerFrame: 0,
     })
-    assert.ok(target.plain().includes('2'), `expected pending count in ${JSON.stringify(target.puts)}`)
+    const plain = target.plain()
+    assert.ok(plain.includes('2'), `expected pending count in ${JSON.stringify(target.puts)}`)
+    assert.ok(!plain.includes('5'), `unread must not duplicate the waiting badge: ${JSON.stringify(target.puts)}`)
+  })
+
+  it('shows the approve glyph in accent when a question is pending and no approval', () => {
+    const asking: SessionState = {
+      ...session('ask', { title: 'asking' }),
+      pendingQuestions: [{ rpcId: 'rpc-q', questions: [{ id: 'q', question: 'Ship?' }], at: 1 }],
+    }
+    const rect: Rect = { row: 2, col: 1, width: 24, height: 4 }
+    const target = new BoundsTarget(rect)
+    renderSidebar(target, {
+      rect,
+      sessions: [asking],
+      focusedId: 'other',
+      theme,
+      glyphs,
+      spinnerFrame: 0,
+    })
+    assert.ok(
+      target.puts.some((p) => p.text.includes(glyphs.approve) && p.style === theme.accent),
+      `expected ${glyphs.approve} in accent, got ${JSON.stringify(target.puts)}`,
+    )
   })
 })
 
@@ -670,12 +861,14 @@ describe('composer', () => {
       glyphs,
     })
     assert.equal(pos.row, rect.row)
-    assert.equal(pos.col, rect.col + stringWidth('中文'))
+    assert.equal(pos.col, rect.col + stringWidth(glyphs.arrow) + 1 + stringWidth('中文'))
     assert.equal(stringWidth('中文'), 4)
   })
 
   it('locates the caret from the full word-wrapped draft', () => {
-    const rect: Rect = { row: 8, col: 3, width: 10, height: 3 }
+    // Width 18 leaves wrapWidth = 11 after the idle `⏎ send` reserve, so
+    // `› 123456789 a` still breaks the `a` onto the next line.
+    const rect: Rect = { row: 8, col: 3, width: 18, height: 3 }
     const target = new BoundsTarget(rect)
     const pos = renderComposer(target, {
       rect,
@@ -719,7 +912,7 @@ describe('composer', () => {
     assert.doesNotMatch(idle.plain(), /queue/)
     assert.ok(idle.puts.some((p) => p.text.includes('send') && p.style === theme.dim))
     assert.equal(pos.row, rect.row)
-    assert.equal(pos.col, rect.col + stringWidth('he'))
+    assert.equal(pos.col, rect.col + stringWidth(glyphs.arrow) + 1 + stringWidth('he'))
   })
 })
 
@@ -836,5 +1029,43 @@ describe('header telemetry', () => {
     const deckAt = crowdedPlain.indexOf('deck')
     const titleAt = crowdedPlain.indexOf('中')
     assert.ok(deckAt >= 0 && titleAt > deckAt)
+  })
+})
+
+describe('renderTranscript scrollbar', () => {
+  it('writes a thumb character in the last column when maxScroll > 0', () => {
+    const items: TranscriptItem[] = Array.from({ length: 10 }, (_, i) => ({
+      kind: 'user' as const,
+      seq: i + 1,
+      time: 0,
+      text: `line ${i}`,
+    }))
+    const lines = layoutTranscript(items, {
+      width: 20,
+      theme,
+      glyphs,
+      spinnerFrame: 0,
+      expandTools: false,
+    })
+    const rect: Rect = { row: 2, col: 3, width: 20, height: 3 }
+    const target = new BoundsTarget(rect)
+    const { maxScroll } = renderTranscript(target, {
+      rect,
+      lines,
+      scrollOffset: 0,
+      theme,
+      glyphs,
+    })
+    assert.ok(maxScroll > 0)
+    const lastCol = rect.col + rect.width - 1
+    const bottom = rect.row + rect.height - 1
+    assert.ok(
+      target.puts.some((p) => p.col === lastCol && (p.text === glyphs.bar || p.text === glyphs.vline)),
+      `expected a scrollbar glyph in column ${lastCol}, got ${JSON.stringify(target.puts)}`,
+    )
+    assert.ok(
+      target.puts.some((p) => p.row === bottom && p.col === lastCol && p.text === glyphs.bar),
+      `expected thumb at bottom-right, got ${JSON.stringify(target.puts.filter((p) => p.col === lastCol))}`,
+    )
   })
 })

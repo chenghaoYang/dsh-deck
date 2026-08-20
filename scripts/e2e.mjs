@@ -364,6 +364,40 @@ async function main() {
       fail('tools sequence', `${error instanceof Error ? error.message : String(error)}; events=${types.join(',')}`)
     }
 
+    try {
+      const skills = await requireCall(client, 'skill.list', { sessionId: toolsSession.sessionId })
+      const children = await requireCall(client, 'subagent.list', { parentSessionId: toolsSession.sessionId })
+      record('scoped catalogs', Array.isArray(skills.skills) && Array.isArray(children.entries), `skills=${skills.skills.length} subagents=${children.entries.length}`)
+    } catch (error) {
+      fail('scoped catalogs', error instanceof Error ? error.message : String(error))
+    }
+
+    const cancelSession = await requireCall(client, 'session.create', { cwd: workspace })
+    await requireCall(client, 'session.prompt', {
+      sessionId: cancelSession.sessionId,
+      mode: 'queue',
+      content: [{ type: 'text', text: 'slow please' }],
+    })
+    await mux.waitFor((envelope) => {
+      const payload = envelope.payload
+      return payload.type === 'session/event'
+        && payload.sessionId === cancelSession.sessionId
+        && isRecord(payload.event)
+        && payload.event.type === 'turn/start'
+    }, STEP_MS, 'turn/start before cancel')
+    await requireCall(client, 'session.cancel', { sessionId: cancelSession.sessionId })
+    const cancelled = await mux.waitFor((envelope) => {
+      const payload = envelope.payload
+      return payload.type === 'session/event'
+        && payload.sessionId === cancelSession.sessionId
+        && isRecord(payload.event)
+        && payload.event.type === 'turn/end'
+        && isRecord(payload.event.data)
+        && isRecord(payload.event.data.reason)
+        && payload.event.data.reason.kind === 'aborted'
+    }, STEP_MS, 'turn/end aborted after cancel')
+    record('session cancel', cancelled.payload.type === 'session/event', 'turn/end reason=aborted')
+
     const allowSession = await requireCall(client, 'session.create', { cwd: workspace })
     const allowPrompt = requireCall(client, 'session.prompt', {
       sessionId: allowSession.sessionId,
@@ -374,6 +408,25 @@ async function main() {
       envelope.payload.type === 'approval/requested' && envelope.payload.sessionId === allowSession.sessionId
     ), STEP_MS, 'approval/requested (allow)')
     captured.approvalAllow = trimApproval(allowRequested)
+    await requireCall(client, 'session.prompt', {
+      sessionId: allowSession.sessionId,
+      mode: 'queue',
+      content: [{ type: 'text', text: 'queued while approval is pending' }],
+    })
+    const queueFrame = await mux.waitFor((envelope) => (
+      envelope.payload.type === 'session/queue'
+      && envelope.payload.sessionId === allowSession.sessionId
+      && Array.isArray(envelope.payload.items)
+      && envelope.payload.items.some((item) => isRecord(item) && item.placement === 'queued')
+    ), STEP_MS, 'session/queue before update')
+    const queuedItem = Array.isArray(queueFrame.payload.items)
+      ? queueFrame.payload.items.findLast((item) => isRecord(item) && item.placement === 'queued')
+      : undefined
+    record(
+      'queue projection',
+      isRecord(queuedItem) && typeof queuedItem.id === 'string',
+      isRecord(queuedItem) && typeof queuedItem.id === 'string' ? queuedItem.id : 'missing message id',
+    )
     const allowReceipt = await client.respond(allowRequested.rpcId, {
       sessionId: allowRequested.payload.sessionId,
       approvalId: allowRequested.payload.approvalId,

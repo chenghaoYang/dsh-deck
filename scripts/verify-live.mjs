@@ -358,7 +358,7 @@ async function main() {
     )
 
     // 6. The modes panel.
-    const ROWS = ['model', 'agent', 'permission', 'plan', 'compact']
+    const ROWS = ['model', 'agent', 'permission', 'plan']
     await send(KEY.ctrl('s'), 2000)
     shot('06 · modes panel', screen)
     const panel = screen.text()
@@ -444,7 +444,7 @@ async function main() {
     await send(KEY.escape, 900)
     await send(KEY.escape, 900)
     shot('11 · panel closed', screen)
-    record('escape closes the panel', !screen.text().includes('compact older history'))
+    record('escape closes the panel', !screen.text().includes('locked once the session has run a turn'))
     record('transcript survived the panel', screen.text().includes('deck-verify-ok'))
     // Mode changes inject notes into the inbox; they must not masquerade as
     // prompts the user typed and has not sent.
@@ -484,6 +484,21 @@ async function main() {
     shot('12 · session switcher', screen)
     record('session switcher opens', /archive|rename|focus/i.test(screen.text()))
     await send(KEY.escape, 700)
+
+    // 11b. macOS Delete is byte 0x7f (Backspace), not Forward Delete. Archive
+    // the focused verification session with real raw Backspace + Return, then
+    // cross-check the Host's durable archive registry. A newly-created blank
+    // session is intentionally hidden by Deck, so it cannot be the target.
+    await send(KEY.ctrl('k'), 900)
+    await send('\u007f', 700)
+    shot('12b · macOS archive confirmation', screen)
+    record('Mac Delete opens archive confirmation', /archive session/i.test(screen.text()))
+    await send(KEY.enter, 1800)
+    const workspace = await rpc('workspace.list', {})
+    const archived = workspace.ok && workspace.value.archivedSessionIds.includes(verifySession)
+    shot('12c · macOS Return archived', screen)
+    record('Mac Return confirms archive through the Host', archived, verifySession)
+    await send(KEY.escape, 500)
 
     // 12. Help.
     await send(KEY.ctrl('g'), 1000)

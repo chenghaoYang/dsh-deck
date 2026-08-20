@@ -292,6 +292,7 @@ async function main(): Promise<void> {
     host,
     connection: 'ready',
     sessionTitle: focused?.title,
+    ...focused?.cwd === undefined ? {} : { project: focused.cwd.split('/').filter(Boolean).at(-1) ?? focused.cwd },
     theme,
     glyphs,
     ...focused === undefined ? {} : { telemetry: focused.telemetry },
@@ -333,9 +334,10 @@ async function main(): Promise<void> {
     hints: sessions.some((s) => s.pendingApproval !== undefined)
       ? [{ key: 'a', label: 'allow' }, { key: 'r', label: 'reject' }]
       : [
-        { key: 'tab', label: 'switch' },
+        { key: '/', label: 'commands' },
+        { key: '^k', label: 'sessions' },
+        { key: '^s', label: 'modes' },
         { key: '^n', label: 'new' },
-        { key: '^c', label: 'cancel' },
         { key: '^g', label: 'help' },
       ],
     message: undefined,

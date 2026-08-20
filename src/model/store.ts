@@ -125,6 +125,19 @@ export class DeckStore {
       })
   }
 
+  /**
+   * Every known session, including archived rows kept addressable for live
+   * approvals, questions, and stream events. UI grouping should use `sessions`;
+   * interaction routing must use this full view.
+   */
+  get allSessions(): readonly SessionState[] {
+    return [...this.byId.values()]
+  }
+
+  isArchived(id: SessionId): boolean {
+    return this.archivedSessionIds.has(id)
+  }
+
   get(id: SessionId): SessionState | undefined {
     return this.byId.get(id)
   }
@@ -205,8 +218,12 @@ export class DeckStore {
       }
       case 'host/session-status': {
         const session = this.ensure(frame.sessionId)
-        if (session.running === frame.running) return
-        this.byId.set(frame.sessionId, { ...session, running: frame.running })
+        // A running status proves the session has started work even if the
+        // initial session list still marked it blank. Clear that flag in the
+        // same update so a newly-running session becomes visible immediately.
+        const blank = frame.running ? false : session.blank
+        if (session.running === frame.running && session.blank === blank) return
+        this.byId.set(frame.sessionId, { ...session, running: frame.running, blank })
         this.emit({ kind: 'status', sessionId: frame.sessionId })
         this.emit({ kind: 'sessions' })
         return

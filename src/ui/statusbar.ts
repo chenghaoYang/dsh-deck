@@ -33,6 +33,8 @@ export interface HeaderProps {
   host: HostDescription | undefined
   connection: 'connecting' | 'ready' | 'reconnecting' | 'closed'
   sessionTitle: string | undefined
+  /** Basename of the focused session workspace, shown before the session title. */
+  project?: string
   theme: Theme
   glyphs: Glyphs
   telemetry?: SessionTelemetry
@@ -47,7 +49,13 @@ export function renderHeader(target: RenderTarget, props: HeaderProps): void {
   const ascii = process.env.DECK_ASCII === '1'
   const dot = ascii ? '*' : '●'
   const connStyle = connectionStyle(connection, theme)
-  const title = sessionTitle !== undefined ? sessionTitle.trim() : ''
+  const session = sessionTitle !== undefined ? sessionTitle.trim() : ''
+  const project = props.project?.trim() ?? ''
+  const title = project.length === 0
+    ? session
+    : session.length === 0 || session === project
+      ? project
+      : `${project} / ${session}`
   const hostLabel = hostLabelText(host)
   const modes = props.modes
 
@@ -188,8 +196,8 @@ function connectionStyle(connection: HeaderProps['connection'], theme: Theme): s
 
 function hostLabelText(host: HostDescription | undefined): string {
   if (host === undefined) return ''
-  const provider = host.provider.trim()
-  const model = host.model.trim()
+  const provider = host.provider?.trim() ?? ''
+  const model = host.model?.trim() ?? ''
   if (provider.length > 0 && model.length > 0) return `${provider} · ${model}`
   return model.length > 0 ? model : provider
 }
@@ -279,7 +287,7 @@ function modelParts(
     return { provider: modes.provider?.trim() ?? '', model: modeModel, effort }
   }
   if (host === undefined) return { provider: '', model: '', effort }
-  return { provider: host.provider.trim(), model: host.model.trim(), effort }
+  return { provider: host.provider?.trim() ?? '', model: host.model?.trim() ?? '', effort }
 }
 
 /** Strip `org/` prefixes so `thinkingmachines/inkling` can shrink to `inkling`. */

@@ -103,8 +103,9 @@ function makeSessionRow(
   const indent = opts.child ? ' ' : ''
   const idx = String(opts.index).padStart(opts.idxDigits, ' ')
   const label = sessionLabel(session)
-  const badge = unreadBadge(session.unread)
   const waiting = pendingApprovalsOf(session).length + pendingQuestionsOf(session).length
+  const blocked = waiting > 0
+  const badge = blocked ? '' : unreadBadge(session.unread)
   const waitingBadge = waitingBadgeText(waiting)
 
   const rest =
@@ -132,7 +133,7 @@ function makeSessionRow(
   if (title.length > 0) spans.push({ text: title, style: titleStyle })
   if (badge.length > 0) {
     spans.push({ text: ' ', style: '' })
-    spans.push({ text: badge, style: session.pendingApproval !== undefined ? theme.warn : theme.accent })
+    spans.push({ text: badge, style: theme.accent })
   }
   if (waitingBadge.length > 0) {
     spans.push({ text: ' ', style: theme.warn })
@@ -149,6 +150,9 @@ function statusGlyph(
   // Approval wins: a blocked background agent must not look merely idle/running.
   if (pendingApprovalsOf(session).length > 0) {
     return { glyph: glyphs.approve, style: theme.warn }
+  }
+  if (pendingQuestionsOf(session).length > 0) {
+    return { glyph: glyphs.approve, style: theme.accent }
   }
   if (session.lastError !== undefined && session.lastError.length > 0) {
     return { glyph: glyphs.error, style: theme.error }

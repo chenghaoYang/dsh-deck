@@ -17,6 +17,7 @@ export type Key =
       kind:
         | 'enter'
         | 'backspace'
+        | 'word-backspace'
         | 'tab'
         | 'escape'
         | 'up'
@@ -31,6 +32,7 @@ export type Key =
     }
   | { kind: 'ctrl'; char: string }
   | { kind: 'alt'; char: string }
+  | { kind: 'modified-enter'; shift: boolean; alt: boolean; ctrl: boolean; super: boolean }
   | { kind: 'paste'; text: string }
   | { kind: 'unknown'; raw: string }
   | {
@@ -184,6 +186,26 @@ export class InputReader {
     this.#escTimer = undefined
   }
 
+  #emitEnter(modifier = 1): void {
+    const bits = Number.isFinite(modifier) ? Math.max(0, modifier - 1) : 0
+    if (bits === 0) {
+      this.#emit({ kind: 'enter' })
+      return
+    }
+    this.#emit({
+      kind: 'modified-enter',
+      shift: (bits & 1) !== 0,
+      alt: (bits & 2) !== 0,
+      ctrl: (bits & 4) !== 0,
+      super: (bits & 8) !== 0,
+    })
+  }
+
+  #emitBackspace(modifier = 1): void {
+    const bits = Number.isFinite(modifier) ? Math.max(0, modifier - 1) : 0
+    this.#emit({ kind: (bits & 2) !== 0 ? 'word-backspace' : 'backspace' })
+  }
+
   #armEsc(): void {
     this.#clearEscTimer()
     this.#escTimer = setTimeout(() => {
@@ -238,7 +260,8 @@ export class InputReader {
           const ss3 = this.#buf[2] ?? ''
           const kind = CSI_NAV[ss3]
           this.#buf = this.#buf.slice(3)
-          if (kind !== undefined) this.#emit({ kind })
+          if (ss3 === 'M') this.#emit({ kind: 'enter' })
+          else if (kind !== undefined) this.#emit({ kind })
           else this.#emit({ kind: 'unknown', raw: `${ESC}O${ss3}` })
           continue
         }
@@ -252,6 +275,14 @@ export class InputReader {
           return
         }
         const rest = this.#buf.slice(1)
+        const restFirst = rest.charCodeAt(0)
+        if (restFirst === 0x7f || restFirst === 0x08) {
+          this.#buf = rest.slice(1)
+          // Legacy macOS Option+Backspace is ESC DEL; preserve Option so the
+          // composer can apply readline word deletion instead of one grapheme.
+          this.#emitBackspace(3)
+          continue
+        }
         const g = firstGrapheme(rest)
         if (g === undefined) return
         this.#buf = rest.slice(g.length)
@@ -276,7 +307,7 @@ export class InputReader {
       }
       if (first === 0x7f || first === 0x08) {
         this.#buf = this.#buf.slice(1)
-        this.#emit({ kind: 'backspace' })
+        this.#emitBackspace()
         continue
       }
       if (first < 0x20) {
@@ -335,9 +366,19 @@ export class InputReader {
       return
     }
     if (final === '~') {
-      const n = (params.split(';')[0] ?? '') || '1'
+      const parts = params.split(';')
+      const n = (parts[0] ?? '') || '1'
       if (n === '200') {
         this.#paste = ''
+        return
+      }
+      // xterm modifyOtherKeys: CSI 27 ; modifier ; codepoint ~
+      if (n === '27' && Number(parts[2]) === 13) {
+        this.#emitEnter(Number(parts[1] ?? 1))
+        return
+      }
+      if (n === '27' && (Number(parts[2]) === 8 || Number(parts[2]) === 127)) {
+        this.#emitBackspace(Number(parts[1] ?? 1))
         return
       }
       const kind = TILDE_NAV[n]
@@ -347,6 +388,29 @@ export class InputReader {
       }
       this.#emit({ kind: 'unknown', raw })
       return
+    }
+    // Kitty keyboard protocol / CSI-u. Ghostty can emit this when enhanced
+    // keyboard reporting is active; 13 is Return regardless of modifier field.
+    if (final === 'u') {
+      const fields = params.split(';')
+      const code = Number((fields[0] ?? '').split(':')[0])
+      const modifier = Number((fields[1] ?? '1').split(':')[0])
+      if (code === 13) {
+        this.#emitEnter(modifier)
+        return
+      }
+      if (code === 9) {
+        this.#emit({ kind: 'tab' })
+        return
+      }
+      if (code === 27) {
+        this.#emit({ kind: 'escape' })
+        return
+      }
+      if (code === 8 || code === 127) {
+        this.#emitBackspace(modifier)
+        return
+      }
     }
     const kind = CSI_NAV[final]
     if (kind !== undefined) {

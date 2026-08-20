@@ -39,6 +39,11 @@ export function rgb(r: number, g: number, b: number): string {
   return sgr(38, 2, r & 0xff, g & 0xff, b & 0xff)
 }
 
+/** Truecolor background. Empty-string styles remain “terminal default”. */
+export function rgbBg(r: number, g: number, b: number): string {
+  return sgr(48, 2, r & 0xff, g & 0xff, b & 0xff)
+}
+
 /** CUP — 1-based row/column. */
 export function cursorTo(row: number, col: number): string {
   return `${CSI}${Math.max(1, row | 0)};${Math.max(1, col | 0)}H`

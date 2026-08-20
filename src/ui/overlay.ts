@@ -24,21 +24,24 @@ import {
   type Span,
   clearRect,
   clipToWidth,
+  fitSpans,
+  isSubsequence,
   paintLine,
   repeatToWidth,
+  spansWidth,
   wrapLines,
 } from './render.ts'
 
 const SEGMENTER = new Intl.Segmenter('en', { granularity: 'grapheme' })
 
-const IMAGE_FOOTER = 'esc close · y copy path'
+const IMAGE_FOOTER = 'esc close · y copy label'
 
 // ---------------------------------------------------------------------------
 // Shared panel chrome (help.ts geometry: centered box, theme.border frame,
 // title inset on the top rule). Title ink is theme.accent.
 // ---------------------------------------------------------------------------
 
-interface OverlayLine {
+export interface OverlayLine {
   spans: Span[]
 }
 
@@ -161,15 +164,22 @@ function paintInner(
   row: number,
   panel: Rect,
   spans: readonly Span[],
+  padStyle: string,
 ): void {
   const innerW = panel.width - 2
   if (innerW <= 0) return
-  paintLine(target, row, panel.col + 1, innerW, { spans: [...spans] })
+  const fitted = fitSpans(spans, innerW)
+  const used = spansWidth(fitted)
+  const padded = used >= innerW ? fitted : [...fitted, { text: ' '.repeat(innerW - used), style: padStyle }]
+  paintLine(target, row, panel.col + 1, innerW, { spans: padded })
 }
 
-function paintPanel(
+/**
+ * Fill and frame a floating panel. The outer transcript rect is left alone so
+ * conversation text stays visible around the box.
+ */
+export function paintFloatingPanel(
   target: RenderTarget,
-  rect: Rect,
   panel: Rect,
   theme: Theme,
   glyphs: Glyphs,
@@ -177,7 +187,6 @@ function paintPanel(
   body: readonly OverlayLine[],
   footer: string,
 ): void {
-  if (rect.width > 0 && rect.height > 0) clearRect(target, rect, theme.dim)
   if (panel.width <= 0 || panel.height <= 0) return
   clearRect(target, panel, theme.base)
   paintTopRule(target, panel, title, theme, glyphs)
@@ -191,12 +200,12 @@ function paintPanel(
     paintSideRules(target, row, panel, theme, glyphs)
     if (i === footerRow) {
       if (innerW > 0) {
-        paintInner(target, row, panel, [{ text: truncate(footer, innerW), style: theme.dim }])
+        paintInner(target, row, panel, [{ text: truncate(footer, innerW), style: theme.dim }], theme.base)
       }
       continue
     }
     const line = body[i]
-    if (line !== undefined) paintInner(target, row, panel, line.spans)
+    if (line !== undefined) paintInner(target, row, panel, line.spans, theme.base)
   }
 }
 
@@ -406,10 +415,10 @@ export function reduceQuestionOverlay(
 
 function questionFooter(state: QuestionOverlayState, question: AskUserQuestionItem | undefined): string {
   if (question === undefined || state.mode === 'other' || questionOptions(question).length === 0) {
-    return 'enter ok · esc cancel'
+    return '⏎ ok · esc cancel'
   }
-  if (question.multiSelect === true) return 'space toggle · enter · o other · esc'
-  return 'enter pick · o other · esc'
+  if (question.multiSelect === true) return 'space toggle · ⏎ confirm · o other · esc'
+  return '⏎ pick · o other · esc'
 }
 
 function questionBody(
@@ -494,7 +503,41 @@ export function renderQuestionOverlay(
   const desiredH = Math.min(rect.height, Math.max(4, lines.length + 3))
   const panel = centerBox(rect, boxW, desiredH)
   const bodyH = Math.max(0, panel.height - 3)
-  paintPanel(target, rect, panel, theme, glyphs, title, windowAround(lines, bodyH, focus), footer)
+  paintFloatingPanel(target, panel, theme, glyphs, title, windowAround(lines, bodyH, focus), footer)
+}
+
+// ---------------------------------------------------------------------------
+// Read-only information panel
+// ---------------------------------------------------------------------------
+
+export interface InfoOverlayState {
+  title: string
+  lines: readonly string[]
+  offset?: number
+}
+
+export function renderInfoOverlay(
+  target: RenderTarget,
+  rect: Rect,
+  state: InfoOverlayState,
+  theme: Theme,
+  glyphs: Glyphs,
+): void {
+  if (rect.width <= 0 || rect.height <= 0) return
+  const boxW = Math.max(4, Math.min(rect.width, 80))
+  const desiredH = Math.min(rect.height, Math.max(5, state.lines.length + 3))
+  const panel = centerBox(rect, boxW, desiredH)
+  const innerW = Math.max(1, panel.width - 2)
+  const bodyH = Math.max(1, panel.height - 3)
+  const maxStart = Math.max(0, state.lines.length - bodyH)
+  const start = Math.min(Math.max(0, state.offset ?? 0), maxStart)
+  const body: OverlayLine[] = []
+  for (const line of state.lines.slice(start, start + bodyH)) {
+    for (const wrapped of wrapLines(line, innerW)) {
+      body.push({ spans: [{ text: wrapped, style: theme.text }] })
+    }
+  }
+  paintFloatingPanel(target, panel, theme, glyphs, state.title, body, '↑↓ scroll · ⏎/esc close')
 }
 
 // ---------------------------------------------------------------------------
@@ -509,12 +552,29 @@ export type DeckCommandAction =
   | 'rename'
   | 'new'
   | 'fork'
+  | 'rewind'
   | 'help'
   | 'quit'
+  | 'cancel'
+  | 'status'
+  | 'cost'
+  | 'skills'
+  | 'agents'
+  | 'workspaces'
+  | 'search'
+  | 'interrupt-agent'
+  | 'queue'
+  | 'remove-queued'
+  | 'steer-queued'
+  | 'dashboard'
+  | 'doctor'
+  | 'vim'
 
 export interface SlashCommandEntry extends CommandDescriptor {
   /** Deck-local chrome action; absent entries execute through commands/execute. */
   action?: DeckCommandAction
+  /** Model-invocable skill; dispatched through session.prompt, not commands/execute. */
+  skill?: boolean
 }
 
 export interface CommandPaletteState {
@@ -534,8 +594,10 @@ function commandName(command: SlashCommandEntry): string {
 }
 
 function matchingCommands(state: CommandPaletteState): SlashCommandEntry[] {
-  const prefix = state.filter.toLocaleLowerCase()
-  return state.commands.filter((command) => commandName(command).toLocaleLowerCase().startsWith(prefix))
+  const query = state.filter
+  return state.commands.filter((command) =>
+    isSubsequence(query, commandName(command)) || isSubsequence(query, command.description),
+  )
 }
 
 export function createCommandPalette(
@@ -631,7 +693,7 @@ export function renderCommandPalette(
     }
     body.push({ spans })
   }
-  paintPanel(target, rect, panel, theme, glyphs, 'commands', body, '↑↓ move · enter run · tab complete · esc')
+  paintFloatingPanel(target, panel, theme, glyphs, 'commands', body, '↑↓ move · ⏎ run · tab complete · esc')
 }
 
 // ---------------------------------------------------------------------------
@@ -666,19 +728,6 @@ export type PickerOverlayResult =
 type PickerRow =
   | { kind: 'heading'; text: string }
   | { kind: 'model'; index: number; model: PickerModel }
-
-function isSubsequence(query: string, haystack: string): boolean {
-  if (query.length === 0) return true
-  const needle = [...query.toLocaleLowerCase()]
-  let i = 0
-  for (const ch of haystack.toLocaleLowerCase()) {
-    if (ch === needle[i]) {
-      i++
-      if (i >= needle.length) return true
-    }
-  }
-  return false
-}
 
 function modelHaystack(model: PickerModel): string {
   const name = model.name ?? ''
@@ -935,8 +984,10 @@ export function renderPickerOverlay(
   const panel = centerBox(rect, boxW, desiredH)
   const innerW = Math.max(1, panel.width - 2)
   const innerH = Math.max(0, panel.height - 2)
-  const footer = state.stage === 'efforts' ? 'enter pick · esc back' : 'type to filter · enter · esc'
-  const title = state.stage === 'efforts' ? 'effort' : 'models'
+  const footer = state.stage === 'efforts'
+    ? '↑↓ choose · ⏎ apply model · esc back'
+    : '↑↓ choose · ⏎ next · type filter · esc close'
+  const title = state.stage === 'efforts' ? 'effort · step 2/2' : 'models · step 1/2'
 
   const body: OverlayLine[] = []
   if (state.stage === 'models' && innerH >= 3) {
@@ -949,7 +1000,269 @@ export function renderPickerOverlay(
   } else {
     body.push(...pickerModelBody(state, innerW, listH, theme, glyphs))
   }
-  paintPanel(target, rect, panel, theme, glyphs, title, body, footer)
+  paintFloatingPanel(target, panel, theme, glyphs, title, body, footer)
+}
+
+// ---------------------------------------------------------------------------
+// Rewind overlay — pick a turn to fork from (double-Esc).
+// ---------------------------------------------------------------------------
+
+const REWIND_FOOTER = '⏎ fork here · esc cancel'
+
+export interface RewindTurn {
+  seq: number
+  turn: number
+  preview: string
+}
+
+export interface RewindOverlayState {
+  turns: readonly RewindTurn[]
+  cursor: number
+}
+
+export type RewindOverlayResult =
+  | { kind: 'continue'; state: RewindOverlayState }
+  | { kind: 'picked'; seq: number }
+  | { kind: 'cancelled' }
+
+export function createRewindOverlay(turns: readonly RewindTurn[]): RewindOverlayState {
+  return { turns, cursor: turns.length === 0 ? 0 : turns.length - 1 }
+}
+
+export function reduceRewindOverlay(state: RewindOverlayState, key: Key): RewindOverlayResult {
+  if (key.kind === 'escape' || (key.kind === 'ctrl' && key.char.toLowerCase() === 'c')) {
+    return { kind: 'cancelled' }
+  }
+  if (key.kind === 'up') {
+    return { kind: 'continue', state: { ...state, cursor: clampIndex(state.cursor - 1, state.turns.length) } }
+  }
+  if (key.kind === 'down' || key.kind === 'tab') {
+    return { kind: 'continue', state: { ...state, cursor: clampIndex(state.cursor + 1, state.turns.length) } }
+  }
+  if (key.kind === 'home') {
+    return { kind: 'continue', state: { ...state, cursor: 0 } }
+  }
+  if (key.kind === 'end') {
+    return { kind: 'continue', state: { ...state, cursor: clampIndex(state.turns.length - 1, state.turns.length) } }
+  }
+  if (key.kind !== 'enter') return { kind: 'continue', state }
+  const turn = state.turns[state.cursor]
+  if (turn === undefined) return { kind: 'continue', state }
+  return { kind: 'picked', seq: turn.seq }
+}
+
+function rewindBody(
+  state: RewindOverlayState,
+  innerW: number,
+  theme: Theme,
+  glyphs: Glyphs,
+): OverlayLine[] {
+  const lines: OverlayLine[] = []
+  for (let i = 0; i < state.turns.length; i++) {
+    const turn = state.turns[i]
+    if (turn === undefined) continue
+    const selected = i === state.cursor
+    const mark = selected ? `${glyphs.arrow} ` : '  '
+    const tag = `#${String(turn.turn)} `
+    const prefixW = stringWidth(mark) + stringWidth(tag)
+    const preview = truncate(turn.preview.replace(/\s+/g, ' ').trim(), Math.max(0, innerW - prefixW))
+    const spans: Span[] = [
+      { text: mark, style: selected ? theme.accent : theme.dim },
+      { text: tag, style: selected ? theme.selected : theme.subtle },
+    ]
+    if (preview.length > 0) {
+      spans.push({ text: preview, style: selected ? theme.selected : theme.text })
+    }
+    lines.push({ spans })
+  }
+  return lines
+}
+
+export function renderRewindOverlay(
+  target: RenderTarget,
+  rect: Rect,
+  state: RewindOverlayState,
+  theme: Theme,
+  glyphs: Glyphs,
+): void {
+  if (rect.width <= 0 || rect.height <= 0) return
+  const boxW = Math.max(4, Math.min(rect.width, 72))
+  const desiredH = Math.min(rect.height, Math.max(5, state.turns.length + 3))
+  const panel = centerBox(rect, boxW, desiredH)
+  const innerW = Math.max(1, panel.width - 2)
+  const bodyH = Math.max(0, panel.height - 3)
+  const lines = rewindBody(state, innerW, theme, glyphs)
+  const focus = clampIndex(state.cursor, lines.length)
+  paintFloatingPanel(target, panel, theme, glyphs, 'rewind', windowAround(lines, bodyH, focus), REWIND_FOOTER)
+}
+
+// ---------------------------------------------------------------------------
+// Queue overlay — pending queued/steering messages (edit, remove, steer).
+// ---------------------------------------------------------------------------
+
+const QUEUE_LIST_FOOTER = '⏎/e edit · d remove · s steer · esc close'
+const QUEUE_EDIT_FOOTER = '⏎ save · esc back'
+
+export interface QueueOverlayItem {
+  id: string
+  placement: 'queued' | 'steering'
+  preview: string
+  text: string
+}
+
+export interface QueueOverlayState {
+  items: readonly QueueOverlayItem[]
+  cursor: number
+  stage: 'list' | 'edit'
+  editDraft: string
+}
+
+export type QueueOverlayResult =
+  | { kind: 'continue'; state: QueueOverlayState }
+  | { kind: 'remove'; id: string; state: QueueOverlayState }
+  | { kind: 'steer'; id: string; state: QueueOverlayState }
+  | { kind: 'edit'; id: string; text: string; state: QueueOverlayState }
+  | { kind: 'cancelled' }
+
+export function createQueueOverlay(items: readonly QueueOverlayItem[]): QueueOverlayState {
+  return { items, cursor: 0, stage: 'list', editDraft: '' }
+}
+
+export function updateQueueOverlayItems(
+  state: QueueOverlayState,
+  items: readonly QueueOverlayItem[],
+): QueueOverlayState {
+  const current = state.items[state.cursor]
+  const at = current === undefined ? -1 : items.findIndex((item) => item.id === current.id)
+  const cursor = clampIndex(at < 0 ? state.cursor : at, items.length)
+  if (state.stage === 'edit') {
+    const editingId = current?.id
+    if (editingId === undefined || !items.some((item) => item.id === editingId)) {
+      return { items, cursor, stage: 'list', editDraft: '' }
+    }
+  }
+  return { ...state, items, cursor }
+}
+
+export function reduceQueueOverlay(state: QueueOverlayState, key: Key): QueueOverlayResult {
+  if (state.stage === 'edit') return reduceQueueEdit(state, key)
+
+  if (key.kind === 'escape' || (key.kind === 'ctrl' && key.char.toLowerCase() === 'c')) {
+    return { kind: 'cancelled' }
+  }
+  if (key.kind === 'up') {
+    return { kind: 'continue', state: { ...state, cursor: clampIndex(state.cursor - 1, state.items.length) } }
+  }
+  if (key.kind === 'down' || key.kind === 'tab') {
+    return { kind: 'continue', state: { ...state, cursor: clampIndex(state.cursor + 1, state.items.length) } }
+  }
+  if (key.kind === 'home') {
+    return { kind: 'continue', state: { ...state, cursor: 0 } }
+  }
+  if (key.kind === 'end') {
+    return { kind: 'continue', state: { ...state, cursor: clampIndex(state.items.length - 1, state.items.length) } }
+  }
+
+  const item = state.items[state.cursor]
+  if (key.kind === 'enter' || (isPrintableChar(key) && key.char === 'e')) {
+    if (item === undefined) return { kind: 'continue', state }
+    return { kind: 'continue', state: { ...state, stage: 'edit', editDraft: item.text } }
+  }
+  if (key.kind === 'backspace' || key.kind === 'delete' || (isPrintableChar(key) && key.char === 'd')) {
+    if (item === undefined) return { kind: 'continue', state }
+    return { kind: 'remove', id: item.id, state }
+  }
+  if (isPrintableChar(key) && key.char === 's') {
+    if (item === undefined) return { kind: 'continue', state }
+    return { kind: 'steer', id: item.id, state }
+  }
+  return { kind: 'continue', state }
+}
+
+function reduceQueueEdit(state: QueueOverlayState, key: Key): QueueOverlayResult {
+  if (key.kind === 'escape') {
+    return { kind: 'continue', state: { ...state, stage: 'list', editDraft: '' } }
+  }
+  if (key.kind === 'paste') {
+    return { kind: 'continue', state: { ...state, editDraft: state.editDraft + key.text } }
+  }
+  if (key.kind === 'backspace') {
+    return { kind: 'continue', state: { ...state, editDraft: popGrapheme(state.editDraft) } }
+  }
+  if (isPrintableChar(key)) {
+    return { kind: 'continue', state: { ...state, editDraft: state.editDraft + key.char } }
+  }
+  if (key.kind !== 'enter') return { kind: 'continue', state }
+
+  const item = state.items[state.cursor]
+  if (item === undefined) {
+    return { kind: 'continue', state: { ...state, stage: 'list', editDraft: '' } }
+  }
+  const text = state.editDraft.trim()
+  if (text.length === 0) return { kind: 'continue', state }
+  return {
+    kind: 'edit',
+    id: item.id,
+    text,
+    state: { ...state, stage: 'list', editDraft: '' },
+  }
+}
+
+function queuePlacementTag(placement: QueueOverlayItem['placement']): string {
+  return placement === 'steering' ? 'steer ' : 'queued '
+}
+
+function queueBody(
+  state: QueueOverlayState,
+  innerW: number,
+  theme: Theme,
+  glyphs: Glyphs,
+): OverlayLine[] {
+  const lines: OverlayLine[] = []
+  if (state.items.length === 0) {
+    lines.push({ spans: [{ text: 'no pending messages', style: theme.dim }] })
+    return lines
+  }
+  for (let i = 0; i < state.items.length; i++) {
+    const item = state.items[i]
+    if (item === undefined) continue
+    const selected = i === state.cursor
+    const mark = selected ? `${glyphs.arrow} ` : '  '
+    const tag = queuePlacementTag(item.placement)
+    const raw = state.stage === 'edit' && selected
+      ? state.editDraft
+      : item.preview.replace(/\s+/g, ' ').trim()
+    const prefixW = stringWidth(mark) + stringWidth(tag)
+    const preview = truncate(raw, Math.max(0, innerW - prefixW))
+    const spans: Span[] = [
+      { text: mark, style: selected ? theme.accent : theme.dim },
+      { text: tag, style: selected ? theme.selected : theme.subtle },
+    ]
+    if (preview.length > 0) {
+      spans.push({ text: preview, style: selected ? theme.selected : theme.text })
+    }
+    lines.push({ spans })
+  }
+  return lines
+}
+
+export function renderQueueOverlay(
+  target: RenderTarget,
+  rect: Rect,
+  state: QueueOverlayState,
+  theme: Theme,
+  glyphs: Glyphs,
+): void {
+  if (rect.width <= 0 || rect.height <= 0) return
+  const boxW = Math.max(4, Math.min(rect.width, 72))
+  const desiredH = Math.min(rect.height, Math.max(5, state.items.length + 3))
+  const panel = centerBox(rect, boxW, desiredH)
+  const innerW = Math.max(1, panel.width - 2)
+  const bodyH = Math.max(0, panel.height - 3)
+  const lines = queueBody(state, innerW, theme, glyphs)
+  const focus = clampIndex(state.cursor, lines.length)
+  const footer = state.stage === 'edit' ? QUEUE_EDIT_FOOTER : QUEUE_LIST_FOOTER
+  paintFloatingPanel(target, panel, theme, glyphs, 'queue', windowAround(lines, bodyH, focus), footer)
 }
 
 // ---------------------------------------------------------------------------
@@ -1038,7 +1351,7 @@ export function renderImageOverlayChrome(
     const row = panel.row + 1 + i
     paintSideRules(target, row, panel, theme, glyphs)
     if (i === footerRow) {
-      paintInner(target, row, panel, [{ text: layout.footer, style: theme.dim }])
+      paintInner(target, row, panel, [{ text: layout.footer, style: theme.dim }], theme.base)
     }
   }
 }

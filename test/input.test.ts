@@ -206,3 +206,84 @@ describe('input mouse', () => {
     assert.doesNotThrow(() => reader.stop())
   })
 })
+
+describe('macOS keyboard input', () => {
+  it('normalizes Return, Keypad Enter, and enhanced Ghostty Return sequences', async () => {
+    const input = new Readable({ read() {} })
+    const { reader, keys } = collect(input)
+    input.push('\r')                    // ordinary macOS Return
+    input.push('\n')                    // terminals configured for LF
+    input.push(`${ESC}OM`)              // application-keypad Enter
+    input.push(`${ESC}[13u`)            // Kitty CSI-u Return
+    input.push(`${ESC}[13;1u`)          // Kitty CSI-u Return + explicit modifier field
+    await new Promise((r) => setImmediate(r))
+    reader.stop()
+    assert.deepEqual(keys, Array.from({ length: 5 }, () => ({ kind: 'enter' as const })))
+  })
+
+  it('preserves Option+Return as the steer binding under CSI-u', async () => {
+    const input = new Readable({ read() {} })
+    const { reader, keys } = collect(input)
+    input.push(`${ESC}[13;3u`)
+    await new Promise((r) => setImmediate(r))
+    reader.stop()
+    assert.deepEqual(keys, [{
+      kind: 'modified-enter', shift: false, alt: true, ctrl: false, super: false,
+    }])
+  })
+
+  it('preserves Shift, Ctrl, and Command modifiers on enhanced Return', async () => {
+    const input = new Readable({ read() {} })
+    const { reader, keys } = collect(input)
+    input.push(`${ESC}[13;2u${ESC}[13;5u${ESC}[13;9u`)
+    await new Promise((r) => setImmediate(r))
+    reader.stop()
+    assert.deepEqual(keys, [
+      { kind: 'modified-enter', shift: true, alt: false, ctrl: false, super: false },
+      { kind: 'modified-enter', shift: false, alt: false, ctrl: true, super: false },
+      { kind: 'modified-enter', shift: false, alt: false, ctrl: false, super: true },
+    ])
+  })
+
+  it('supports xterm modifyOtherKeys Return without losing Option', async () => {
+    const input = new Readable({ read() {} })
+    const { reader, keys } = collect(input)
+    input.push(`${ESC}[27;1;13~${ESC}[27;3;13~`)
+    await new Promise((r) => setImmediate(r))
+    reader.stop()
+    assert.deepEqual(keys, [
+      { kind: 'enter' },
+      { kind: 'modified-enter', shift: false, alt: true, ctrl: false, super: false },
+    ])
+  })
+
+  it('normalizes enhanced Backspace while preserving ordinary Mac Delete', async () => {
+    const input = new Readable({ read() {} })
+    const { reader, keys } = collect(input)
+    input.push('\u007f')
+    input.push(`${ESC}\u007f`)          // Option+Backspace in legacy mode
+    input.push(`${ESC}[127u`)
+    input.push(`${ESC}[8u`)
+    input.push(`${ESC}[127;3u`)          // Option+Backspace under CSI-u
+    input.push(`${ESC}[27;3;127~`)       // Option+Backspace under modifyOtherKeys
+    await new Promise((r) => setImmediate(r))
+    reader.stop()
+    assert.deepEqual(keys, [
+      { kind: 'backspace' },
+      { kind: 'word-backspace' },
+      { kind: 'backspace' },
+      { kind: 'backspace' },
+      { kind: 'word-backspace' },
+      { kind: 'word-backspace' },
+    ])
+  })
+
+  it('does not misinterpret xterm F3 as Return', async () => {
+    const input = new Readable({ read() {} })
+    const { reader, keys } = collect(input)
+    input.push(`${ESC}[13~`)
+    await new Promise((r) => setImmediate(r))
+    reader.stop()
+    assert.deepEqual(keys, [{ kind: 'unknown', raw: `${ESC}[13~` }])
+  })
+})

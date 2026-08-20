@@ -11,6 +11,7 @@ interface AppInternals {
   cursor: number
   stopped: boolean
   insert(text: string): void
+  focus(id: string): void
   send(mode: 'queue' | 'steer'): Promise<void>
 }
 
@@ -74,5 +75,35 @@ describe('DeckApp prompt failure recovery', () => {
 
     assert.equal(view.draft, 'new prompt')
     assert.equal(view.cursor, [...'new prompt'].length)
+  })
+
+  it('restores a failed prompt only to its source session after focus changes', async () => {
+    const view = appView()
+    view.store.applySessionList([
+      { sessionId: 'session-send', updatedAt: 2, running: false, blank: false },
+      { sessionId: 'session-b', updatedAt: 1, running: false, blank: false },
+    ])
+    view.draft = 'prompt for A'
+    view.cursor = [...view.draft].length
+    let resolvePrompt!: (result: unknown) => void
+    view.client.call = async (method) => {
+      if (method === 'session.prompt') return new Promise((resolve) => { resolvePrompt = resolve })
+      if (method === 'session.history') return { ok: true, value: { events: [], hasMore: false } }
+      if (method === 'session.models') return { ok: true, value: { groups: [] } }
+      throw new Error(`unexpected ${method}`)
+    }
+
+    const sending = view.send('queue')
+    await new Promise<void>((resolve) => queueMicrotask(resolve))
+    view.focus('session-b')
+    view.insert('prompt for B')
+    resolvePrompt(failure)
+    await sending
+    assert.equal(view.draft, 'prompt for B')
+
+    view.focus('session-send')
+    assert.equal(view.draft, 'prompt for A')
+    view.focus('session-b')
+    assert.equal(view.draft, 'prompt for B')
   })
 })

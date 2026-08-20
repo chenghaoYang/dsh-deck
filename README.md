@@ -1,18 +1,48 @@
 <h1>deck</h1>
 
+**English** · [简体中文](README.zh-CN.md)
+
 **Supervise a whole crew of coding agents from one terminal screen.**
 
-A cockpit for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness),
-built for [Ghostty](https://ghostty.org). No dependencies, no browser tab, no
-Electron — just `deck`.
+A terminal-native, out-of-process cockpit for
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness), built for
+[Ghostty](https://ghostty.org). Deck attaches to an existing `dsh web` host or
+starts one for you, then puts every coding session, approval, question, model,
+and mode on one screen. It does not replace the Harness or own your provider
+credentials; it is the fast terminal control surface in front of them.
 
 ![Deck running in Ghostty](docs/screenshots/dsh-deck-ghostty.png)
 
 [![CI](https://github.com/chenghaoYang/dsh-deck/actions/workflows/ci.yml/badge.svg)](https://github.com/chenghaoYang/dsh-deck/actions/workflows/ci.yml)
 ![node](https://img.shields.io/badge/node-%3E%3D22.19-brightgreen)
 ![dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)
-![tests](https://img.shields.io/badge/tests-224%20passing-brightgreen)
+![tests](https://img.shields.io/badge/tests-260+-brightgreen)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
+## Quick start
+
+Prerequisites: macOS or Linux, Node.js 22.19 or newer, and a model credential
+supported by DeepSeek Harness.
+
+Harness publishes the newest preview on the `next` tag; Deck is currently
+verified with `0.1.0-rc.8`.
+
+```sh
+npm i -g @deepseek-ai/dsh@next
+npm i -g github:chenghaoYang/dsh-deck
+deck --cwd ~/code/my-project
+```
+
+`deck` connects to `http://127.0.0.1:3080` when a host is already running. If
+not, it starts `dsh web` in the requested working directory and stops that host
+when Deck exits. Press `/` for commands, `ctrl+k` for session management, and
+`ctrl+g` for help.
+
+If Harness exits before Deck opens, inspect the log path printed by Deck.
+Harness rc.8 rejects bootstrap variables such as `NO_PROXY` and
+`SSL_CERT_FILE` in a project `.env`; export genuine launch variables from the
+shell instead, and keep client certificates in the project-specific variable
+its tooling expects.
 
 ```
 deck  ● ready  refactor the auth module           nvidia · thinkingmachines/inkling · high  standard
@@ -50,11 +80,11 @@ it gets the full-fidelity stream — reasoning deltas, tool calls, approvals,
 questions, and the telemetry projections nobody documented.
 
 <table>
-<tr><td><b>One screen, many agents</b></td><td>Background sessions keep streaming while you read another. The sidebar surfaces the one that stopped and is waiting on you.</td></tr>
-<tr><td><b>Every dsh mode, one panel</b></td><td><code>ctrl+s</code>: model, reasoning effort, agent preset, permissions, plan mode, compaction.</td></tr>
+<tr><td><b>One screen, many agents</b></td><td>The sidebar stays scoped to the current project; <code>ctrl+k</code> remains the global switcher; <code>ctrl+\</code> is the dashboard — peek and reply without switching.</td></tr>
+<tr><td><b>Every dsh mode, one panel</b></td><td><code>ctrl+s</code>: model, reasoning effort, agent preset, permissions, and plan mode.</td></tr>
 <tr><td><b>Actually interactive</b></td><td>Click to focus, drag to copy, wheel to scroll, <code>ctrl+k</code> to fuzzy-switch sessions.</td></tr>
-<tr><td><b>Terminal-native</b></td><td>Taskbar progress, desktop notifications, clickable file links, inline images, prompt marks — each capability-gated.</td></tr>
-<tr><td><b>Verified on a real terminal</b></td><td>224 unit tests, a protocol e2e, and a 29-step live run that drives the real binary on a real pty against a real model.</td></tr>
+<tr><td><b>Terminal-native</b></td><td>Taskbar progress, desktop notifications, prompt marks — each capability-gated. Images open with <code>ctrl+o</code> as a Kitty overlay, not inline in the transcript.</td></tr>
+<tr><td><b>Verified on a real terminal</b></td><td>Unit tests, a protocol e2e, and a live PTY run that drives the real binary against a real model.</td></tr>
 </table>
 
 ## Why
@@ -76,7 +106,12 @@ stopped and is waiting on you.
 - **Many sessions, one screen.** Background sessions keep streaming while you
   read another. The sidebar shows what is running, what errored, and — most
   importantly — what is **blocked on your approval**. An agent waiting for a
-  permission you cannot see is indistinguishable from a hang.
+  permission you cannot see is indistinguishable from a hang. `ctrl+\` opens
+  the dashboard: peek the selected agent's latest output, reply without
+  switching, or dispatch a new session from the same panel.
+- **Project identity stays visible.** The header shows
+  `project / session title`, so similarly named sessions from different
+  workspaces do not lose their context.
 - **Approvals inline.** `a` allows, `r` rejects, from anywhere, including for a
   background session.
 - **Real streaming.** Reasoning, text, and tool calls arrive as deltas. A long
@@ -85,17 +120,18 @@ stopped and is waiting on you.
   replaces whatever was accumulated from deltas, so a reconnect mid-turn shows
   the true message rather than a truncated one.
 - **Every dsh mode on one panel.** `ctrl+s` switches the model and reasoning
-  effort, the agent preset, the permission preset, plan mode, and context
-  compaction. The harness scatters these across two different RPC conventions
-  and five method names; that is the host's business, not yours, so here they
-  are five rows. The header keeps the safety-relevant ones visible: `read-only`
+  effort, the agent preset, the permission preset, and plan mode. One-shot
+  actions such as `/compact` stay in the slash-command palette. The header
+  keeps the safety-relevant modes visible: `read-only`
   and `full-access` get saturated color, because "which permissions is this
   agent running with" is not a question you should have to go looking for.
 - **Terminal-native touches**, each capability-gated and a no-op where
   unsupported: progress in the tab/taskbar while an agent works, a desktop
   notification when an agent needs you, clipboard copy of an answer straight out
-  of the terminal, clickable file links, and inline images via the Kitty
-  graphics protocol.
+  of the terminal. Images in a session open with `ctrl+o` as a Kitty graphics
+  overlay; they are not drawn inline in the transcript. Tool-call file paths
+  are OSC 8 hyperlinks (`DECK_EDITOR_URI` to open them in an editor). `/doctor`
+  reports which of these the current terminal actually supports.
 - **Your conversation stays in your scrollback.** A full-screen TUI draws on the
   alternate screen and vanishes on exit; Deck writes a compact transcript back to
   the primary screen on quit, with semantic prompt marks so your terminal's
@@ -105,8 +141,11 @@ stopped and is waiting on you.
 
 Requires Node >= 22.19 and the harness CLI.
 
+The newest Harness preview is published on the `next` tag; Deck is currently
+verified with `0.1.0-rc.8`.
+
 ```sh
-npm i -g @deepseek-ai/dsh                              # the agent runtime
+npm i -g @deepseek-ai/dsh@next                         # latest preview runtime
 npm i -g github:chenghaoYang/dsh-deck                  # this cockpit
 ```
 
@@ -208,6 +247,10 @@ agent-default-model:
 chain of thought streams into the transcript as reasoning rather than answer
 text.
 
+Models that advertise reasoning efforts use an explicit two-step picker: choose
+the model on step 1/2, then choose the effort and press Return to apply it on
+step 2/2.
+
 For the key, either `export NVIDIA_API_KEY=…` before starting the host — a
 per-run override, and it wins — or add/update the `NVIDIA_API_KEY` mapping in
 `$DSH_HOME/.credentials.yaml` (`~/.dsh/.credentials.yaml` by default), which
@@ -267,23 +310,42 @@ command, so you can type "add tests" without triggering anything.
 | Key | |
 |---|---|
 | `enter` | send (queues behind the running turn) |
-| `alt+enter` | send as steering, interrupting the turn |
+| `shift+enter` | newline in the draft |
+| `option+return` / `alt+enter` | steer at the next step boundary; does not cancel the turn |
 | `tab` | next session |
 | `alt+1`…`alt+9` | jump to a session |
 | `ctrl+n` | new session |
-| `ctrl+s` | modes: model, agent preset, permission, plan, compact |
+| `ctrl+s` | modes: model, agent preset, permission, plan |
 | `ctrl+p` | model and reasoning effort |
 | `ctrl+k` | session manager: search, archive, rename, or create |
-| `delete` / `ctrl+d` in session manager | confirm archive (conversation log is kept) |
+| `ctrl+\` | dashboard: peek every session, reply without switching, or dispatch a new one |
+| `/queue` | visual list of pending messages — edit, remove, or promote to steering |
+| `/doctor` | terminal, host, clipboard, and OSC capability report |
+| `/vim-mode` | park in the transcript (`j`/`k` `g`/`G`); `i` returns to the composer |
+| `backspace` / `delete` / `ctrl+d` in session manager | confirm archive when the search box is empty (conversation log is kept) |
 | `ctrl+f` | fork the session |
+| `esc esc` | rewind: fork at a previous user turn |
+| `ctrl+r` | expand or collapse reasoning |
 | `ctrl+c` | cancel the running turn, or quit when idle |
 | `ctrl+d` | quit |
 | `ctrl+y` | copy the last answer |
-| `ctrl+e` | expand or collapse tool detail |
+| `ctrl+o` | open the latest image as a Kitty overlay |
+| `ctrl+t` | toggle mouse capture (off = native terminal selection) |
+| `ctrl+e` / `cmd+right` when Ghostty maps it to `Ctrl+E` | move to the end of the draft |
+| `ctrl+x` | expand or collapse tool detail |
+| `option+b` / `option+f` | move one word left / right |
 | `ctrl+u` / `ctrl+w` | clear draft / delete word |
 | `up`/`down`, `pgup`/`pgdn`, `ctrl+l` | scroll |
 | `ctrl+g` | help |
 | `/` | live slash-command palette; type to filter, Tab completes |
+
+On macOS, set `macos-option-as-alt = true` in Ghostty to use Option-based
+bindings such as Option+Return and Option+B/F. Ghostty reserves Command+Return
+for fullscreen by default, so that chord does not reach Deck. If your Ghostty
+config maps Command+Right to `Ctrl+E` and Command+Backspace to `Ctrl+U`, Deck
+treats them as end-of-draft and clear-draft respectively. Forward Delete is
+`Fn+Delete` on a Mac keyboard. `Ctrl+C` closes the active modal first; press it
+again to cancel a running turn or exit while idle.
 
 When an approval is waiting, the overlay takes the keyboard so answering is one
 keystroke: `a`/`y`/`enter` allows, `r`/`n`/`esc` rejects. The footer changes to
@@ -299,7 +361,6 @@ show it.
 │  agent      标准模式 locked once the session has run a turn  │
 │  permission workspace-write                                  │
 │  plan       off                                              │
-│  compact    compact older history now                        │
 │↑↓ move · ⏎ change · esc close                                │
 ╰──────────────────────────────────────────────────────────────╯
 ```
@@ -321,7 +382,6 @@ including a change someone made from the web UI.
 | agent | `agentPreset.select`, blank sessions only |
 | permission | `/permission <preset>` |
 | plan | `/plan` and `/plan off` |
-| compact | `/compact` |
 
 ### Slash commands
 
@@ -332,10 +392,22 @@ the focused session, so optional plugins appear without a Deck update. Use
 filter to the composer.
 
 Deck provides `/model`, `/effort`, `/modes`, `/preset`, `/permissions`,
-`/sessions`, `/resume`, `/archive`, `/new`, `/clear`, `/rename`, `/fork`, `/help`, and
-`/exit`. A standard dsh host currently adds commands such as `/compact`,
+`/sessions`, `/resume`, `/archive`, `/new`, `/clear`, `/rename`, `/fork`,
+`/rewind`,
+`/cancel`, `/interrupt`, `/dashboard`, `/queue`, `/dequeue`, `/steer-queued`,
+`/doctor`, `/vim-mode`, `/status`,
+`/context`, `/cost`, `/tokens`, `/search`, `/skills`, `/agents`,
+`/interrupt-agent`, `/workspaces`, `/help`, and `/exit` (`/q`). A standard dsh host
+currently adds commands such as `/compact`,
 `/export`, `/feedback`, `/goal`, `/permission`, and `/plan`; the palette always
 uses the host's live catalog rather than assuming they are installed.
+
+Common control paths map to real Host APIs: cancel interrupts the focused turn;
+queue commands open a visual list (edit in place, `d` remove, `s` steer) or still take an id; search uses
+`session.search` and falls back to local title/cwd filtering when the server-side
+index is unavailable; skills and subagents are scoped to the focused session.
+Continuable subagent sessions use the dedicated subagent history, prompt, and
+interrupt RPCs, while one-shot subagents remain read-only.
 
 Commands with arguments complete back into the composer. For example, choose
 `/plan`, type `off`, and press Enter. Deck sends `/plan off` through
@@ -343,14 +415,20 @@ Commands with arguments complete back into the composer. For example, choose
 
 ### Mouse
 
-The mouse works: click a sidebar session to focus it, scroll the transcript
-with the wheel, and drag to select text — the selection is copied on release,
-through the OS clipboard *and* OSC 52, so it survives both a strict terminal
-and an SSH hop. `shift+drag` always falls through to your terminal's native
-selection, and `ctrl+t` turns mouse capture off entirely. `ctrl+k` opens the
-session manager: type to filter, Delete/`^d` opens an archive confirmation,
-`^r` renames, and `^n` creates a session. Archiving hides the session from
-Deck but deliberately keeps its conversation log on disk.
+Pasting a filesystem path to a `.png` / `.jpg` / `.gif` / `.webp` file attaches
+it to the next prompt (sent as an image content part). Copy uses the OS
+clipboard when one is available (`pbcopy`, `wl-copy`/`xclip`, or `clip`) and
+always also writes OSC 52.
+
+Mouse capture is on by default: click a sidebar session to focus it, scroll the
+transcript with the wheel, and drag to select text — the selection is copied on
+release, through the OS clipboard *and* OSC 52, so it survives both a strict
+terminal and an SSH hop. Shift+drag is ignored by Deck so the terminal can keep
+native selection where the emulator withholds shift-clicks; `ctrl+t` turns
+mouse capture off entirely. `ctrl+k` opens the session manager: type to
+filter; with an empty filter, Backspace/Delete/`^d` opens an archive
+confirmation, `^r` renames, and `^n` creates a session. Archiving hides the
+session from Deck but deliberately keeps its conversation log on disk.
 
 ### Environment
 
@@ -411,12 +489,16 @@ community-built, and several already exist:
   moving very fast. If you want one agent in one window, use it.
 - [`@huiliyi37/dsh-tianshu-tui`](https://github.com/huiliyi37/dsh-tianshu-tui)
   has a custom ANSI engine and already does inline Kitty/iTerm2 images.
-- [waku](https://github.com/egoist/waku) is the native-app inspiration, with
-  drivers for Codex, Claude Code, ACP, OpenCode, Pi, and Amp — but none for
-  DeepSeek Harness.
+- [waku](https://github.com/egoist/waku) is the native-app inspiration: every
+  coding agent is a driver behind one cockpit. As of 0.0.13 it has a DeepSeek
+  Harness driver (`driver/deepseek.rs`) alongside Codex, Claude Code, ACP,
+  OpenCode, Pi, and Amp. Deck does not replace Waku for multi-harness desktop
+  users. Deck's remaining distinction is that it is **terminal-native**, an
+  **out-of-process** client of an unmodified `dsh web` host, and uses Ghostty
+  OSC rather than embedding the harness.
 
-Deck is deliberately a different shape: **out-of-process** and
-**multi-session**. That is not just an implementation detail. Every in-process
+Deck is deliberately a different shape from the in-process TUIs: **out-of-process**
+and **multi-session**. That is not just an implementation detail. Every in-process
 TUI is a bundle stacked into a profile, so a bad combination can refuse to boot
 — installing one into the `web` profile has bricked people with duplicate
 service ids. Deck cannot do that: it never mounts into your profile, it talks to
@@ -425,9 +507,9 @@ and you can run Deck and any of the above side by side against the same host.
 
 ## Status
 
-Early, but not untested. 224 unit tests, a protocol e2e against a real throwaway
-host, and a 29-step live run that drives the shipped binary on a real pty. Last
-verified against `dsh` 0.1.0-rc.7 and `thinkingmachines/inkling` on NVIDIA NIM.
+Early, but not untested. Unit tests, a protocol e2e against a real throwaway
+host, and a live PTY run that drives the shipped binary. Last
+verified against `dsh` 0.1.0-rc.8 and `thinkingmachines/inkling` on NVIDIA NIM.
 
 `dsh` itself is a developer preview that warns about breaking changes, and Deck
 mirrors a hand-written copy of its wire contract

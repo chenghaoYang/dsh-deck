@@ -17,6 +17,7 @@ import {
   endSync,
   eraseDisplay,
   hideCursor,
+  hyperlink,
   restoreTerminal,
   showCursor,
 } from './ansi.ts'
@@ -27,6 +28,7 @@ export interface Cell {
   char: string
   style: string
   width: 1 | 2
+  link?: string
 }
 
 const EMPTY: Cell = { char: ' ', style: '', width: 1 }
@@ -42,7 +44,11 @@ function isCont(cell: Cell): boolean {
 
 function cellsEqual(a: Cell, b: Cell): boolean {
   if (isCont(a) || isCont(b)) return a === b
-  return a.char === b.char && a.style === b.style && a.width === b.width
+  return a.char === b.char && a.style === b.style && a.width === b.width && a.link === b.link
+}
+
+function resetGrid(grid: Cell[][]): void {
+  for (const row of grid) row.fill(EMPTY)
 }
 
 function makeGrid(rows: number, cols: number): Cell[][] {
@@ -63,6 +69,8 @@ export class Screen {
   #rows: number
   #prev: Cell[][]
   #next: Cell[][] | undefined
+  /** Recycled `#prev` from the last end(); reused as `#next` on the next begin(). */
+  #spare: Cell[][] | undefined
   #opened = false
   #closed = false
   #mouseEnabled = false
@@ -171,21 +179,36 @@ export class Screen {
     }
   }
 
-  /** Start a new virtual frame. */
+  /** Start a new virtual frame. Reuses the previous write buffer when size is unchanged. */
   begin(): void {
     this.#syncSize()
-    this.#next = makeGrid(this.#rows, this.#cols)
+    const rows = this.#rows
+    const cols = this.#cols
+    const existing = this.#next ?? this.#spare
+    this.#spare = undefined
+    if (
+      existing !== undefined &&
+      existing.length === rows &&
+      (existing[0]?.length ?? 0) === cols
+    ) {
+      resetGrid(existing)
+      this.#next = existing
+    } else {
+      this.#next = makeGrid(rows, cols)
+    }
   }
 
   /**
    * Write text at a 1-based position with a style; clipped to bounds, wide
-   * chars respected (never written as a half cell).
+   * chars respected (never written as a half cell). `link` is an OSC 8 URI
+   * applied to each written grapheme.
    */
-  put(row: number, col: number, text: string, style?: string): void {
+  put(row: number, col: number, text: string, style?: string, link?: string): void {
     const grid = this.#next
     if (grid === undefined) return
     if (row < 1 || row > this.#rows) return
     const s = style ?? ''
+    const href = link !== undefined && link.length > 0 ? link : undefined
     let c = col
     for (const g of graphemes(text)) {
       const w = graphemeWidth(g)
@@ -196,7 +219,7 @@ export class Screen {
         continue
       }
       if (c + w - 1 > this.#cols) break
-      this.#place(grid, row - 1, c - 1, g, w, s)
+      this.#place(grid, row - 1, c - 1, g, w, s, href)
       c += w
     }
   }
@@ -209,15 +232,22 @@ export class Screen {
     char?: string,
     style?: string,
   ): void {
+    const grid = this.#next
+    if (grid === undefined) return
+    if (width <= 0 || height <= 0) return
     const fillChar = firstPaintGrapheme(char)
     const s = style ?? ''
-    const w = graphemeWidth(fillChar) === 2 ? 2 : 1
-    const ch = w === 2 ? fillChar : fillChar
+    const w: 1 | 2 = graphemeWidth(fillChar) === 2 ? 2 : 1
+    const ch = fillChar
     for (let r = 0; r < height; r++) {
+      const absRow = row + r
+      if (absRow < 1 || absRow > this.#rows) continue
       let c = 0
       while (c < width) {
         if (w === 2 && c + 2 > width) break
-        this.put(row + r, col + c, ch, s)
+        const absCol = col + c
+        if (absCol + w - 1 > this.#cols) break
+        if (absCol >= 1) this.#place(grid, absRow - 1, absCol - 1, ch, w, s)
         c += w
       }
     }
@@ -247,6 +277,7 @@ export class Screen {
     }
     if (this.#style !== '') out += RESET
     if (this.#caps.syncOutput) out += endSync()
+    this.#spare = this.#prev
     this.#prev = next
     this.#write(out)
   }
@@ -263,18 +294,37 @@ export class Screen {
       out += style === '' ? RESET : this.#style === '' ? style : RESET + style
       this.#style = style
     }
-    out += cell.char.length > 0 ? cell.char : ' '
+    const glyph = cell.char.length > 0 ? cell.char : ' '
+    const href = cell.link
+    out +=
+      this.#caps.hyperlinks && href !== undefined && href.length > 0
+        ? hyperlink(href, glyph)
+        : glyph
     this.#cursorRow = row
     this.#cursorCol = col + cell.width
     return out
   }
 
-  #place(grid: Cell[][], row0: number, col0: number, char: string, width: 1 | 2, style: string): void {
+  #place(
+    grid: Cell[][],
+    row0: number,
+    col0: number,
+    char: string,
+    width: 1 | 2,
+    style: string,
+    link?: string,
+  ): void {
     const row = grid[row0]
     if (row === undefined) return
     this.#clearAt(row, col0)
     if (width === 2) this.#clearAt(row, col0 + 1)
-    row[col0] = { char, style, width }
+    if (link !== undefined && link.length > 0) {
+      row[col0] = { char, style, width, link }
+    } else if (char === ' ' && style === '' && width === 1) {
+      row[col0] = EMPTY
+    } else {
+      row[col0] = { char, style, width }
+    }
     if (width === 2 && col0 + 1 < this.#cols) row[col0 + 1] = CONT
   }
 
@@ -305,6 +355,8 @@ export class Screen {
     this.#cols = cols
     this.#rows = rows
     this.#prev = makeGrid(rows, cols)
+    this.#next = undefined
+    this.#spare = undefined
   }
 
   #onStreamResize = (): void => {

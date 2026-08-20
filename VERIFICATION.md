@@ -1,23 +1,20 @@
 # Deck verification
 
+Current as of Deck 0.1.0. The capture below is a historical e2e log against
+`dsh` **0.1.0-rc.7**. `DeckStore` keeps `pendingQuestions` / `pendingQuestion`
+and answers them over `/api/respond`. `package.json` already defines `"e2e"`
+and includes `LICENSE` in `files`.
+
 Live `approval/requested` and `question/requested` frames were captured against
 `dsh` **0.1.0-rc.7** (globally installed) driven by the bundled fake-llm. No
 real API key. The user's `~/.dsh` and the host already listening on **3080**
 were not touched.
 
-Integrator: add this to `package.json` scripts (this module does not own that file):
-
-```json
-"e2e": "node --experimental-strip-types scripts/e2e.mjs"
-```
-
-Also add `LICENSE` (and optionally `VERIFICATION.md` / `scripts`) to `files` if
-they should ship in the published tarball.
-
 ## Re-run
 
 ```sh
-node --experimental-strip-types scripts/e2e.mjs
+npm run e2e
+# same script: node --experimental-strip-types scripts/e2e.mjs
 ```
 
 Requires Node `>= 22.19`, a `dsh` on `$PATH`, and free ports in `3090+` /
@@ -199,15 +196,14 @@ Follow-up the model actually received (fake-llm log):
 [{"role":"tool","tool_call_id":"call_fake_ask","content":"{\"answers\":[{\"id\":\"q_proceed\",\"selected\":[\"Continue\"]}]}"}]
 ```
 
-## Contract / store mismatches the integrator must fix
+## Contract / store notes from the capture
 
-These are live facts. `contract.ts` / `store.ts` / `package.json` were not edited.
+These were live facts at capture time. Items 1 and 4 are no longer true in
+Deck 0.1.0.
 
-1. **`DeckStore` drops questions.** `applyMux` handles `approval/requested` and
-   `approval/resolved` but **returns without state** on `question/requested` and
-   `question/resolved`. There is no `pendingQuestion` (contrast `pendingApproval`).
-   The UI cannot show or answer a live question until the store keeps
-   `{rpcId, sessionId, questions}` and the shell posts `/api/respond` with
+1. **`DeckStore` keeps questions.** `applyMux` records `question/requested` and
+   `question/resolved` on `pendingQuestions` / `pendingQuestion` (the active
+   head). The UI answers a live question over `/api/respond` with
    `QuestionResponsePayload`.
 2. **`host.describe.home` is the OS homedir**, not `$DSH_HOME`. Upstream
    `api-proxy.ts` sets `home: homedir()` for the Web breadcrumb. Isolation
@@ -215,8 +211,8 @@ These are live facts. `contract.ts` / `store.ts` / `package.json` were not edite
    readiness check. `describe.cwd` is the host process cwd.
 3. **`host.describe.version` is `0.0.1`**, not the CLI's `0.1.0-rc.7`. The
    field is the host-app package version.
-4. **`package.json` has no `e2e` script** and `files` does not yet list
-   `LICENSE`. Commands are above.
+4. **`package.json` defines `"e2e"`** (`npm run e2e`) and `files` includes
+   `LICENSE`. `VERIFICATION.md` and `scripts/` remain unpublished.
 
 No respond-payload mismatch was found for approvals or questions.
 

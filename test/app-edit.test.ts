@@ -21,6 +21,7 @@ interface AppInternals {
   draft: string
   cursor: number
   overlay?: unknown
+  expandTools: boolean
   stopped: boolean
   screen: FakeScreen
   term: {
@@ -86,6 +87,58 @@ describe('DeckApp grapheme editing', () => {
     view.onKey({ kind: 'ctrl', char: 'w' })
     assert.equal(view.draft, 'go ')
   })
+
+  it('Forward Delete removes the grapheme after the caret', () => {
+    const view = appView()
+    const accented = 'a\u0301'
+    const family = '👨‍👩‍👧‍👦'
+    view.draft = `${accented}${family}z`
+    view.cursor = 0
+
+    view.onKey({ kind: 'delete' })
+    assert.equal(view.draft, `${family}z`)
+    assert.equal(view.cursor, 0)
+    view.onKey({ kind: 'delete' })
+    assert.equal(view.draft, 'z')
+  })
+
+  it('supports Mac word movement and readline end-of-line without stealing Ctrl+E', () => {
+    const view = appView()
+    view.draft = 'one two three'
+    view.cursor = [...view.draft].length
+
+    view.onKey({ kind: 'alt', char: 'b' })
+    assert.equal(view.cursor, 8)
+    view.onKey({ kind: 'alt', char: 'b' })
+    assert.equal(view.cursor, 4)
+    view.onKey({ kind: 'alt', char: 'f' })
+    assert.equal(view.cursor, 8)
+    view.onKey({ kind: 'ctrl', char: 'e' })
+    assert.equal(view.cursor, [...view.draft].length)
+
+    assert.equal(view.expandTools, false)
+    view.onKey({ kind: 'ctrl', char: 'x' })
+    assert.equal(view.expandTools, true)
+  })
+
+  it('deletes the previous word for Mac Option+Backspace', () => {
+    const view = appView()
+    view.draft = 'one two three'
+    view.cursor = [...view.draft].length
+
+    view.onKey({ kind: 'word-backspace' })
+    assert.equal(view.draft, 'one two ')
+    assert.equal(view.cursor, [...view.draft].length)
+  })
+
+  it('inserts a newline for enhanced Shift+Return', () => {
+    const view = appView()
+    view.draft = 'firstsecond'
+    view.cursor = 5
+    view.onKey({ kind: 'modified-enter', shift: true, alt: false, ctrl: false, super: false })
+    assert.equal(view.draft, 'first\nsecond')
+    assert.equal(view.cursor, 6)
+  })
 })
 
 describe('DeckApp caret visibility', () => {
@@ -115,7 +168,8 @@ describe('DeckApp caret visibility', () => {
     view.render()
 
     const layout = computeLayout(80, 24, { composerHeight: 1 })
-    assert.deepEqual(shown[0], { row: layout.composer.row, col: layout.composer.col + 2 })
+    // Prompt glyph `› ` sits in front of the draft; cursor 2 is two Latin cells past it.
+    assert.deepEqual(shown[0], { row: layout.composer.row, col: layout.composer.col + 4 })
     assert.equal(hidden, 0)
 
     view.overlay = { kind: 'image', alt: 'test', data: new Uint8Array(), transmitted: true }
@@ -124,10 +178,19 @@ describe('DeckApp caret visibility', () => {
 
     view.overlay = undefined
     view.render()
-    assert.deepEqual(shown[1], { row: layout.composer.row, col: layout.composer.col + 2 })
+    assert.deepEqual(shown[1], { row: layout.composer.row, col: layout.composer.col + 4 })
 
     view.stopped = false
     await view.quit()
     assert.equal(closed, 1)
+  })
+})
+
+describe('DeckApp modal keyboard behavior', () => {
+  it('Ctrl+C closes ordinary modals before affecting the running session', () => {
+    const view = appView()
+    view.overlay = { kind: 'modes' }
+    view.onKey({ kind: 'ctrl', char: 'c' })
+    assert.equal(view.overlay, undefined)
   })
 })

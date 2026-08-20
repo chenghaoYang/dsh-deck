@@ -177,6 +177,7 @@ function paintHeader(
   width: number,
   extra: {
     title?: string
+    project?: string
     host?: HostDescription
     telemetry?: SessionTelemetry
     modes?: ModeSummary
@@ -190,6 +191,7 @@ function paintHeader(
     host: extra.host,
     connection: extra.connection ?? 'ready',
     sessionTitle: extra.title,
+    ...(extra.project !== undefined ? { project: extra.project } : {}),
     theme,
     glyphs,
     ...(extra.telemetry !== undefined ? { telemetry: extra.telemetry } : { telemetry: sampleTel }),
@@ -214,6 +216,27 @@ function paintFooter(
 }
 
 describe('renderHeader without modes', () => {
+  it('survives a host description without provider or model on the first frame', () => {
+    const { provider: _provider, model: _model, ...hostWithoutModel } = host
+    const target = paintHeader(80, {
+      title: 'starting',
+      host: hostWithoutModel,
+      telemetry: {},
+    })
+    assert.doesNotThrow(() => target.plain())
+    assert.doesNotMatch(target.plain(), /undefined/)
+    assert.match(target.plain(), /starting/)
+  })
+
+  it('shows the current project separately from the session title', () => {
+    const target = paintHeader(120, {
+      project: 'data-agent-nl2sql',
+      title: '你好',
+      telemetry: {},
+    })
+    assert.match(target.plain(), /data-agent-nl2sql \/ 你好/)
+  })
+
   it('renders the captured 80-col header byte-for-byte', () => {
     const target = paintHeader(80, { title: 'ok', host })
     assert.deepEqual(target.puts, [

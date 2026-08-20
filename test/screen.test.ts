@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { Readable } from 'node:stream'
 import { afterEach, describe, it } from 'node:test'
-import { beginSync, cursorTo, endSync, hideCursor, restoreTerminal, showCursor } from '../src/term/ansi.ts'
+import { beginSync, cursorTo, endSync, hideCursor, hyperlink, restoreTerminal, showCursor } from '../src/term/ansi.ts'
 import type { TerminalCapabilities } from '../src/term/capabilities.ts'
 import { InputReader, type Key } from '../src/term/input.ts'
 import { Screen } from '../src/term/screen.ts'
@@ -235,6 +235,51 @@ describe('screen', () => {
     assert.ok(out.output.includes('·'))
     assert.ok(out.output.includes('中'))
     assert.ok(!out.output.includes(cursorTo(2, 4)))
+  })
+
+  it('identical frames after begin reuse emit no cell updates', () => {
+    const out = fakeOut()
+    const screen = new Screen(out.stream, caps({ syncOutput: false }))
+    openScreens.push(screen)
+    screen.open()
+    out.clear()
+    screen.begin()
+    screen.fill(1, 1, 8, 1, ' ')
+    screen.put(1, 1, 'Hi')
+    screen.end()
+    assert.ok(out.output.includes('Hi'))
+    out.clear()
+    screen.begin()
+    screen.fill(1, 1, 8, 1, ' ')
+    screen.put(1, 1, 'Hi')
+    screen.end()
+    assert.equal(out.output, '')
+  })
+
+  it('put with a link wraps the grapheme in OSC 8', () => {
+    const out = fakeOut()
+    const screen = new Screen(out.stream, caps({ syncOutput: false }))
+    openScreens.push(screen)
+    screen.open()
+    out.clear()
+    screen.begin()
+    screen.put(1, 1, 'X', '', 'https://example.com')
+    screen.end()
+    assert.ok(out.output.includes(hyperlink('https://example.com', 'X')), out.output)
+  })
+
+  it('put with a link does not emit OSC 8 when hyperlinks is off', () => {
+    const out = fakeOut()
+    const screen = new Screen(out.stream, caps({ syncOutput: false, hyperlinks: false }))
+    openScreens.push(screen)
+    screen.open()
+    out.clear()
+    screen.begin()
+    screen.put(1, 1, 'X', '', 'https://example.com')
+    screen.end()
+    assert.ok(out.output.includes('X'), out.output)
+    assert.ok(!out.output.includes('\u001b]8;'), out.output)
+    assert.ok(!out.output.includes(hyperlink('https://example.com', 'X')), out.output)
   })
 })
 

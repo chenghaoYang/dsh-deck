@@ -14,6 +14,7 @@ import {
   hyperlink,
   restoreTerminal,
   rgb,
+  rgbBg,
   sanitizeOscPayload,
   setTitle,
   sgr,
@@ -29,6 +30,7 @@ describe('ansi builders', () => {
     assert.equal(sgr(1, 31), '\u001b[1;31m')
     assert.equal(fg256(4), '\u001b[38;5;4m')
     assert.equal(rgb(1, 2, 3), '\u001b[38;2;1;2;3m')
+    assert.equal(rgbBg(1, 2, 3), '\u001b[48;2;1;2;3m')
     assert.equal(cursorTo(2, 5), '\u001b[2;5H')
     assert.equal(hideCursor(), '\u001b[?25l')
     assert.equal(showCursor(), '\u001b[?25h')
