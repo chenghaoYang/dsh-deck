@@ -783,6 +783,52 @@ describe('layoutTranscript', () => {
     }
     assert.match(lines.map(lineText).join('\n'), /ls src/)
   })
+
+  it('puts a file link on a user-message path span', () => {
+    const lines = layoutTranscript(
+      [{ kind: 'user', seq: 1, time: 0, text: 'see src/ui/app.ts please' }],
+      { width: 48, theme, glyphs, spinnerFrame: 0, expandTools: false },
+    )
+    const linked = lines.flatMap((line) => line.spans).filter((span) => span.link !== undefined)
+    assert.equal(linked.length, 1)
+    const href = linked[0]?.link
+    assert.ok(href)
+    assert.ok(href.includes('app.ts') || href.startsWith('file://'), href)
+    assert.match(linked[0]!.text, /app\.ts/)
+  })
+
+  it('does not link a user message without a path', () => {
+    const lines = layoutTranscript(
+      [{ kind: 'user', seq: 1, time: 0, text: 'hello' }],
+      { width: 48, theme, glyphs, spinnerFrame: 0, expandTools: false },
+    )
+    for (const span of lines.flatMap((line) => line.spans)) {
+      assert.equal(span.link, undefined)
+    }
+  })
+
+  it('links an assistant inline backtick path', () => {
+    const lines = layoutTranscript(
+      [
+        {
+          kind: 'assistant',
+          seq: 1,
+          turn: 1,
+          step: 0,
+          text: 'see `src/ui/app.ts`',
+          streaming: false,
+        },
+      ],
+      { width: 48, theme, glyphs, spinnerFrame: 0, expandTools: false },
+    )
+    const linked = lines.flatMap((line) => line.spans).filter((span) => span.link !== undefined)
+    assert.equal(linked.length, 1)
+    const href = linked[0]?.link
+    assert.ok(href)
+    assert.ok(href.includes('app.ts') || href.startsWith('file://'), href)
+    assert.match(linked[0]!.text, /app\.ts/)
+    assert.doesNotMatch(linked[0]!.text, /`/)
+  })
 })
 
 describe('sidebar', () => {

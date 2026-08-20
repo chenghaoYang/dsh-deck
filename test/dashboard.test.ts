@@ -6,10 +6,12 @@ import type { Key } from '../src/term/input.ts'
 import { stringWidth } from '../src/term/width.ts'
 import {
   createDashboard,
+  isCtrlSlash,
   peekLines,
   reduceDashboard,
   renderDashboard,
   updateDashboardSessions,
+  visibleDashboardRows,
   type DashboardResult,
   type DashboardSession,
   type DashboardState,
@@ -339,14 +341,17 @@ describe('reduceDashboard', () => {
     assert.equal(insertI.draft, 'i')
   })
 
-  it('escape from input with draft goes to list; second escape cancels', () => {
+  it('escape from input with draft goes to list; esc then steps back to dispatch', () => {
     const start = createDashboard(catalog, 'beta')
     const typed = mustContinue(feed(start, [{ kind: 'char', char: 'a' }]))
     assert.equal(typed.focus, 'input')
     const back = mustContinue(reduceDashboard(typed, { kind: 'escape' }))
     assert.equal(back.focus, 'list')
     assert.equal(back.draft, 'a')
-    assert.equal(reduceDashboard(back, { kind: 'escape' }).kind, 'cancelled')
+    const atDispatch = mustContinue(reduceDashboard(back, { kind: 'escape' }))
+    assert.equal(atDispatch.cursor, 0)
+    assert.equal(atDispatch.draft, 'a')
+    assert.equal(reduceDashboard(atDispatch, { kind: 'escape' }).kind, 'cancelled')
   })
 
   it('ctrl+c cancels; empty-draft escape from input cancels', () => {
@@ -402,6 +407,27 @@ describe('peekLines', () => {
   })
 })
 
+function sessionIds(state: DashboardState): string[] {
+  const ids: string[] = []
+  for (const row of visibleDashboardRows(state)) {
+    if (row.kind === 'session') ids.push(row.session.id)
+  }
+  return ids
+}
+
+function selectedId(state: DashboardState): string | undefined {
+  const row = visibleDashboardRows(state)[state.cursor]
+  return row?.kind === 'session' ? row.session.id : undefined
+}
+
+function idleCatalog(count: number): DashboardSession[] {
+  const rows: DashboardSession[] = []
+  for (let i = 0; i < count; i++) {
+    rows.push(session(`i${i}`, { title: `idle ${i}`, updatedAt: i, cwd: `/work/${i}` }))
+  }
+  return rows
+}
+
 function paintAll(rect: Rect): BoundsTarget {
   const target = new BoundsTarget(rect)
   const start = createDashboard(catalog, 'beta')
@@ -423,15 +449,46 @@ function paintAll(rect: Rect): BoundsTarget {
       unread: i % 4 === 0 ? 12 : 0,
       updatedAt: Date.now() - i * 3_600_000,
       items: peekItems,
+      ...i % 3 === 0 ? { pendingTool: 'very-long-pending-tool-name' } : {},
     }))
   }
   renderDashboard(target, rect, createDashboard(many, 's11'), theme, glyphs)
+  renderDashboard(target, rect, createDashboard(many, 's11', {
+    grouping: 'directory',
+    pinned: ['s11', 's0'],
+    pinOrder: ['s11', 's0'],
+  }), theme, glyphs)
   renderDashboard(target, rect, createDashboard([], undefined), theme, glyphs)
 
   const longDraft = mustContinue(feed(createDashboard(catalog, 'alpha'), [
     { kind: 'char', char: '很长的中文草稿'.repeat(12) },
   ]))
   renderDashboard(target, rect, longDraft, theme, glyphs)
+
+  const searching = mustContinue(feed(createDashboard(catalog, 'beta'), [
+    { kind: 'ctrl', char: '/' },
+    { kind: 'char', char: 's' },
+    { kind: 'char', char: ':' },
+    { kind: 'char', char: 'blocked' },
+  ]))
+  renderDashboard(target, rect, searching, theme, glyphs)
+
+  const renaming = mustContinue(reduceDashboard(createDashboard(catalog, 'alpha'), { kind: 'ctrl', char: 'r' }))
+  renderDashboard(target, rect, renaming, theme, glyphs)
+
+  const folded = createDashboard(idleCatalog(12), undefined, {
+    pinned: ['i0'],
+    pinOrder: ['i0'],
+  })
+  renderDashboard(target, rect, folded, theme, glyphs)
+  const filtered = mustContinue(reduceDashboard(
+    mustContinue(feed(createDashboard(catalog, 'alpha'), [
+      { kind: 'ctrl', char: '/' },
+      { kind: 'char', char: 'Alpha' },
+    ])),
+    { kind: 'enter' },
+  ))
+  renderDashboard(target, rect, filtered, theme, glyphs)
   return target
 }
 
@@ -485,4 +542,205 @@ describe('dashboard render', () => {
     assert.ok(spin0 !== undefined && frame0.puts.some((p) => p.text.includes(spin0)))
     assert.ok(spin1 !== undefined && frame1.puts.some((p) => p.text.includes(spin1)))
   })
+
+  it('shows pendingTool in the rendered status for a running session', () => {
+    const rect: Rect = { row: 1, col: 1, width: 80, height: 24 }
+    const target = new BoundsTarget(rect)
+    renderDashboard(target, rect, createDashboard(catalog, 'beta'), theme, glyphs)
+    const plain = target.puts.map((put) => put.text).join('')
+    assert.ok(plain.includes('bash'))
+    assert.ok(!plain.includes('running'))
+  })
 })
+
+describe('dashboard search', () => {
+  it('isCtrlSlash accepts all three encodings', () => {
+    assert.equal(isCtrlSlash({ kind: 'ctrl', char: '/' }), true)
+    assert.equal(isCtrlSlash({ kind: 'ctrl', char: '_' }), true)
+    assert.equal(isCtrlSlash({ kind: 'ctrl', char: '\x7f' }), true)
+    assert.equal(isCtrlSlash({ kind: 'ctrl', char: 'c' }), false)
+    assert.equal(isCtrlSlash({ kind: 'char', char: '/' }), false)
+  })
+
+  it('Ctrl+/ search filters; Enter applies; Esc clears; s:blocked prefix', () => {
+    const start = createDashboard(catalog, 'alpha')
+    const searching = mustContinue(reduceDashboard(start, { kind: 'ctrl', char: '/' }))
+    assert.equal(searching.focus, 'search')
+    assert.equal(searching.searchDraft, '')
+    assert.equal(searching.draft, '')
+
+    const typed = mustContinue(feed(searching, [
+      { kind: 'char', char: 's' },
+      { kind: 'char', char: ':' },
+      { kind: 'char', char: 'b' },
+      { kind: 'char', char: 'l' },
+      { kind: 'char', char: 'o' },
+      { kind: 'char', char: 'c' },
+      { kind: 'char', char: 'k' },
+      { kind: 'char', char: 'e' },
+      { kind: 'char', char: 'd' },
+    ]))
+    assert.equal(typed.searchDraft, 's:blocked')
+    assert.equal(typed.draft, '')
+    assert.deepEqual(sessionIds(typed), ['gamma'])
+
+    const applied = mustContinue(reduceDashboard(typed, { kind: 'enter' }))
+    assert.equal(applied.focus, 'list')
+    assert.equal(applied.filter, 's:blocked')
+    assert.deepEqual(sessionIds(applied), ['gamma'])
+
+    const cleared = mustContinue(reduceDashboard(applied, { kind: 'escape' }))
+    assert.equal(cleared.filter, '')
+    assert.equal(cleared.searchDraft, '')
+    assert.deepEqual(sessionIds(cleared), ['gamma', 'beta', 'alpha'])
+
+    const again = mustContinue(reduceDashboard(cleared, { kind: 'ctrl', char: '_' }))
+    assert.equal(again.focus, 'search')
+    const cancelled = mustContinue(reduceDashboard(again, { kind: 'ctrl', char: '\x7f' }))
+    assert.equal(cancelled.focus, 'list')
+    assert.equal(cancelled.filter, '')
+  })
+})
+
+describe('dashboard pins, grouping, idle fold', () => {
+  it('createDashboard options apply pinned and grouping', () => {
+    const state = createDashboard(catalog, 'alpha', {
+      grouping: 'directory',
+      pinned: ['alpha'],
+      pinOrder: ['alpha'],
+    })
+    assert.equal(state.grouping, 'directory')
+    assert.deepEqual([...state.pinned], ['alpha'])
+    assert.deepEqual([...state.pinOrder], ['alpha'])
+    assert.equal(selectedId(state), 'alpha')
+    assert.deepEqual(
+      state.sessions.map((row) => row.id),
+      [...catalog]
+        .sort((a, b) => (a.cwd ?? '').localeCompare(b.cwd ?? ''))
+        .map((row) => row.id),
+    )
+  })
+
+  it('updateDashboardSessions preserves pin and selected id', () => {
+    const start = createDashboard(catalog, 'beta', {
+      pinned: ['beta'],
+      pinOrder: ['beta'],
+    })
+    const next = updateDashboardSessions(start, [
+      session('beta', { title: 'Beta review', running: true, updatedAt: 1 }),
+      session('alpha', { title: 'Alpha notes', updatedAt: 99 }),
+    ])
+    assert.deepEqual([...next.pinned], ['beta'])
+    assert.deepEqual([...next.pinOrder], ['beta'])
+    assert.equal(next.grouping, start.grouping)
+    assert.equal(selectedId(next), 'beta')
+  })
+
+  it('Ctrl+T pin moves row; pinned idle is not folded', () => {
+    const pair = createDashboard([
+      session('old', { title: 'old', updatedAt: 1 }),
+      session('new', { title: 'new', updatedAt: 2 }),
+    ], 'old')
+    assert.deepEqual(pair.sessions.map((row) => row.id), ['new', 'old'])
+    const pinned = mustContinue(reduceDashboard(pair, { kind: 'ctrl', char: 't' }))
+    assert.deepEqual([...pinned.pinned], ['old'])
+    assert.deepEqual([...pinned.pinOrder], ['old'])
+    assert.deepEqual(pinned.sessions.map((row) => row.id), ['old', 'new'])
+    assert.equal(selectedId(pinned), 'old')
+
+    const atOldest = createDashboard(idleCatalog(10), 'i0', { idleExpanded: true })
+    const pinnedOld = mustContinue(reduceDashboard(atOldest, { kind: 'ctrl', char: 't' }))
+    const folded = mustContinue(reduceDashboard(pinnedOld, { kind: 'char', char: 'h' }))
+    assert.equal(folded.idleExpanded, false)
+    assert.ok(sessionIds(folded).includes('i0'))
+    const more = visibleDashboardRows(folded).find((row) => row.kind === 'idle-more')
+    assert.equal(more?.kind, 'idle-more')
+    if (more?.kind === 'idle-more') assert.equal(more.hidden, 1)
+  })
+
+  it('idle fold keeps 8 and Enter on the more-row expands', () => {
+    const state = createDashboard(idleCatalog(10))
+    const rows = visibleDashboardRows(state)
+    assert.equal(rows.length, 1 + 8 + 1)
+    assert.deepEqual(sessionIds(state), ['i9', 'i8', 'i7', 'i6', 'i5', 'i4', 'i3', 'i2'])
+    const last = rows[rows.length - 1]
+    assert.equal(last?.kind, 'idle-more')
+    if (last?.kind === 'idle-more') assert.equal(last.hidden, 2)
+
+    const atMore = mustContinue(reduceDashboard(state, { kind: 'end' }))
+    assert.equal(visibleDashboardRows(atMore)[atMore.cursor]?.kind, 'idle-more')
+    const expanded = mustContinue(reduceDashboard(atMore, { kind: 'enter' }))
+    assert.equal(expanded.idleExpanded, true)
+    assert.equal(visibleDashboardRows(expanded).some((row) => row.kind === 'idle-more'), false)
+    assert.deepEqual(sessionIds(expanded), ['i9', 'i8', 'i7', 'i6', 'i5', 'i4', 'i3', 'i2', 'i1', 'i0'])
+
+    const rect: Rect = { row: 1, col: 1, width: 80, height: 24 }
+    const target = new BoundsTarget(rect)
+    renderDashboard(target, rect, state, theme, glyphs)
+    assert.ok(target.puts.map((put) => put.text).join('').includes('more idle'))
+  })
+
+  it('Ctrl+G groups by cwd', () => {
+    const start = createDashboard([
+      session('b', { title: 'b', cwd: '/z', blocked: true, updatedAt: 2 }),
+      session('a', { title: 'a', cwd: '/a', updatedAt: 1 }),
+    ], 'b')
+    assert.equal(start.grouping, 'state')
+    assert.equal(start.sessions[0]?.id, 'b')
+    const grouped = mustContinue(reduceDashboard(start, { kind: 'ctrl', char: 'g' }))
+    assert.equal(grouped.grouping, 'directory')
+    assert.deepEqual(grouped.sessions.map((row) => row.id), ['a', 'b'])
+    assert.equal(selectedId(grouped), 'b')
+  })
+})
+
+describe('dashboard rename, stop, esc', () => {
+  it('Ctrl+R rename result', () => {
+    const start = createDashboard(catalog, 'alpha')
+    const renaming = mustContinue(reduceDashboard(start, { kind: 'ctrl', char: 'r' }))
+    assert.equal(renaming.focus, 'rename')
+    assert.equal(renaming.renameDraft, 'Alpha notes')
+    const edited = mustContinue(feed(renaming, [
+      { kind: 'ctrl', char: 'u' },
+      { kind: 'char', char: 'N' },
+      { kind: 'char', char: 'e' },
+      { kind: 'char', char: 'w' },
+    ]))
+    const result = reduceDashboard(edited, { kind: 'enter' })
+    assert.equal(result.kind, 'rename')
+    if (result.kind !== 'rename') return
+    assert.equal(result.id, 'alpha')
+    assert.equal(result.title, 'New')
+    assert.equal(result.state.focus, 'list')
+    assert.equal(result.state.renameDraft, '')
+  })
+
+  it('Ctrl+X running cancels; Ctrl+X idle twice archives', () => {
+    const running = reduceDashboard(createDashboard(catalog, 'beta'), { kind: 'ctrl', char: 'x' })
+    assert.equal(running.kind, 'cancel')
+    if (running.kind === 'cancel') {
+      assert.equal(running.id, 'beta')
+      assert.equal(running.state.stopArmedId, undefined)
+    }
+
+    const idle = createDashboard(catalog, 'alpha')
+    const archived = feed(idle, [
+      { kind: 'ctrl', char: 'x' },
+      { kind: 'ctrl', char: 'x' },
+    ])
+    assert.equal(archived.kind, 'archive')
+    if (archived.kind !== 'archive') return
+    assert.equal(archived.id, 'alpha')
+    assert.equal(archived.state.stopArmedId, undefined)
+  })
+
+  it('Esc from a session row goes to cursor 0; second Esc cancels', () => {
+    const start = createDashboard(catalog, 'alpha')
+    assert.ok(start.cursor > 0)
+    const atDispatch = mustContinue(reduceDashboard(start, { kind: 'escape' }))
+    assert.equal(atDispatch.cursor, 0)
+    assert.equal(atDispatch.focus, 'list')
+    assert.equal(reduceDashboard(atDispatch, { kind: 'escape' }).kind, 'cancelled')
+  })
+})
+

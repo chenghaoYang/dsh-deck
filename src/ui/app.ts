@@ -73,15 +73,18 @@ import {
   type RewindOverlayState,
   type SlashCommandEntry,
 } from './overlay.ts'
+import { loadPrefs, savePrefs } from '../model/prefs.ts'
 import {
   createDashboard,
   reduceDashboard,
   renderDashboard,
   updateDashboardSessions,
+  visibleDashboardRows,
   type DashboardSession,
   type DashboardState,
 } from './dashboard.ts'
-import { doctorFindings, doctorLines } from './doctor.ts'
+import { doctorFindings, doctorFix, doctorFixLines, doctorLines, type DoctorInput } from './doctor.ts'
+import { reduceVimComposer, type VimInsertMode } from './vim.ts'
 import {
   createSwitcher,
   reduceSwitcher,
@@ -131,6 +134,7 @@ const VIM_HINTS = [
 
 const ESC_REWIND_MS = 700
 const IMAGE_PATH = /\.(?:png|jpe?g|gif|webp)$/i
+const DOCTOR_FOOTER = 'f fix · ↑↓ scroll · ⏎/esc close'
 
 function approvalHints(count: number, target: string, tool: string): readonly { key: string; label: string }[] {
   const more = count > 1 ? ` · ${String(count - 1)} more pending` : ''
@@ -174,13 +178,13 @@ const DECK_COMMANDS: readonly SlashCommandEntry[] = [
   { name: 'rewind', description: 'Fork the focused session at a previous turn', action: 'rewind' },
   { name: 'cancel', description: 'Interrupt the running turn', action: 'cancel' },
   { name: 'interrupt', description: 'Interrupt the running turn', action: 'cancel' },
-  { name: 'dashboard', description: 'Peek, reply, and dispatch across sessions', action: 'dashboard' },
-  { name: 'agents-dashboard', description: 'Peek, reply, and dispatch across sessions', action: 'dashboard' },
+  { name: 'dashboard', description: 'Peek, reply, dispatch, search, pin, and rename sessions', action: 'dashboard' },
+  { name: 'agents-dashboard', description: 'Peek, reply, dispatch, search, pin, and rename sessions', action: 'dashboard' },
   { name: 'queue', description: 'Edit, remove, or steer pending messages', action: 'queue' },
   { name: 'dequeue', description: 'Remove a pending message', input: { hint: '<id>' }, action: 'remove-queued' },
   { name: 'steer-queued', description: 'Promote a queued message to steering', input: { hint: '<id>' }, action: 'steer-queued' },
-  { name: 'doctor', description: 'Check terminal, host, and clipboard capabilities', action: 'doctor' },
-  { name: 'vim-mode', description: 'Toggle vim-style scrollback keys (j/k g/G)', action: 'vim' },
+  { name: 'doctor', description: 'Check terminal, host, and clipboard capabilities; /doctor fix applies in-process repairs', action: 'doctor' },
+  { name: 'vim-mode', description: 'Toggle vim keys: composer i/a/h/l, Esc Esc parks the transcript', action: 'vim' },
   { name: 'vim', description: 'Toggle vim-style scrollback keys', action: 'vim' },
   { name: 'status', description: 'Show session, model, mode, and queue status', action: 'status' },
   { name: 'context', description: 'Show context-window and token breakdown', action: 'cost' },
@@ -207,9 +211,9 @@ const BINDINGS = [
   { keys: 'option+return', label: 'steer at the next step boundary (does not cancel the turn)' },
   { keys: 'tab', label: 'next session' },
   { keys: 'ctrl+k', label: 'session manager: search, Delete archive, ^r rename, ^n new' },
-  { keys: 'ctrl+\\', label: 'dashboard: peek, reply, or dispatch without switching' },
-  { keys: '/doctor', label: 'terminal, host, and clipboard diagnostics' },
-  { keys: '/vim-mode', label: 'toggle vim scrollback keys: j/k g/G, i insert, esc park' },
+  { keys: 'ctrl+\\', label: 'dashboard: peek, reply, dispatch, search, pin, rename' },
+  { keys: '/doctor', label: 'diagnostics; /doctor fix (or f) applies in-process repairs' },
+  { keys: '/vim-mode', label: 'composer vim (i/a/h/l); Esc Esc parks the transcript' },
   { keys: '/queue', label: 'edit, remove, or steer pending messages' },
   { keys: 'alt+1 … alt+9', label: 'jump to a session' },
   { keys: 'mouse', label: 'click a session to focus it; drag in the transcript to select and copy; wheel scrolls' },
@@ -257,7 +261,7 @@ export class DeckApp {
   private readonly store = new DeckStore()
   private readonly connection: Connection
   private readonly caps: TerminalCapabilities
-  private readonly theme: Theme
+  private theme: Theme
   private readonly glyphs: Glyphs
   private readonly screen: Screen
   private readonly input: InputReader
@@ -279,10 +283,16 @@ export class DeckApp {
   private expandTools = false
   private expandReasoning = false
   private sendMode: 'queue' | 'steer' = 'queue'
-  /** Opt-in: `/vim-mode` or `DECK_VIM=1`. Parks the keyboard in the transcript. */
+  /** Opt-in: `/vim-mode` or `DECK_VIM=1`. Composer vim + optional transcript park. */
   private vimMode = false
-  /** When vimMode is on, Esc parks here so j/k/g/G scroll instead of typing. */
+  /** Composer insert vs normal; only consulted while vimMode && !scrollbackFocus. */
+  private composerVim: VimInsertMode = 'insert'
+  /** Last vim delete, for `p`/`P`. */
+  private yank: string | undefined
+  /** When vimMode is on, Esc from composer NORMAL parks here so j/k/g/G scroll. */
   private scrollbackFocus = false
+  /** Last grouping/pin signature written to prefs, so j/k does not hit disk. */
+  private dashboardPrefSig = ''
   private lastEscAt = 0
   private lastTitle = ''
   private lastFrameAt = 0
@@ -555,8 +565,15 @@ export class DeckApp {
     // stealing the keyboard for, and it makes allow/reject a single keystroke.
     if (this.pendingApprovalTarget() !== undefined && this.answerKey(key)) return
 
+    if (this.vimMode && this.scrollbackFocus && key.kind === 'paste') {
+      this.scrollbackFocus = false
+      this.composerVim = 'insert'
+    }
+    if (this.vimMode && !this.scrollbackFocus) {
+      if (this.applyVimComposer(key)) return
+    }
+
     if (key.kind === 'paste') {
-      if (this.vimMode && this.scrollbackFocus) this.scrollbackFocus = false
       if (this.tryAttachImage(key.text)) return
       this.insert(key.text)
       return
@@ -684,9 +701,40 @@ export class DeckApp {
     }
   }
 
+  private applyVimComposer(key: Key): boolean {
+    const yank = this.yank
+    const result = reduceVimComposer({
+      draft: this.draft,
+      cursor: this.cursor,
+      mode: this.composerVim,
+      ...yank === undefined ? {} : { yank },
+    }, key)
+    if (result.kind === 'unhandled') return false
+    this.draft = result.state.draft
+    this.cursor = result.state.cursor
+    this.composerVim = result.state.mode
+    this.yank = result.state.yank
+    this.draftRevision += 1
+    if (result.kind === 'park') this.scrollbackFocus = true
+    this.requestFrame()
+    if (result.kind === 'send') void this.send('queue')
+    else if (
+      result.kind === 'continue'
+      && this.draft.startsWith('/')
+      && !/\s/u.test(this.draft)
+    ) {
+      void this.maybeOpenCommandPalette()
+    }
+    return true
+  }
+
   private onVimScrollback(char: string): void {
-    if (char === 'i') {
+    if (char === 'i' || char === 'a' || char === 'I' || char === 'A') {
       this.scrollbackFocus = false
+      this.composerVim = 'insert'
+      if (char === 'I') this.cursor = 0
+      else if (char === 'A') this.cursor = codePointLength(this.draft)
+      else if (char === 'a') this.cursor = nextGraphemeBoundary(this.draft, this.cursor)
       this.requestFrame()
       return
     }
@@ -865,6 +913,12 @@ export class DeckApp {
     }
     if (this.overlay?.kind === 'switcher') {
       this.overlay = { kind: 'switcher', state: updateSwitcherEntries(this.overlay.state, this.switcherEntries()) }
+    }
+    if (this.overlay?.kind === 'dashboard') {
+      this.overlay = {
+        kind: 'dashboard',
+        state: updateDashboardSessions(this.overlay.state, this.dashboardSessions()),
+      }
     }
     this.notice(`archived ${session === undefined ? 'session' : `“${this.titleOf(session)}”`} · log kept on disk`, 'info')
     this.requestFrame()
@@ -1106,6 +1160,14 @@ export class DeckApp {
       return
     }
     if (overlay.kind === 'info') {
+      if (
+        overlay.state.title === 'doctor'
+        && key.kind === 'char'
+        && key.char.toLowerCase() === 'f'
+      ) {
+        this.applyDoctorFix()
+        return
+      }
       if (key.kind === 'up' || key.kind === 'down' || key.kind === 'pageup' || key.kind === 'pagedown') {
         const delta = key.kind === 'up' ? -1 : key.kind === 'down' ? 1 : key.kind === 'pageup' ? -8 : 8
         this.overlay = {
@@ -1171,6 +1233,7 @@ export class DeckApp {
       switch (result.kind) {
         case 'continue':
           this.overlay = { kind: 'dashboard', state: result.state }
+          this.persistDashboardPrefs(result.state)
           this.maybeLoadDashboardPeek(result.state)
           break
         case 'cancelled':
@@ -1191,6 +1254,20 @@ export class DeckApp {
             ? undefined
             : { kind: 'dashboard', state: { ...overlay.state, draft: '' } }
           void this.dashboardDispatch(result.text, result.attach)
+          break
+        case 'rename':
+          this.overlay = { kind: 'dashboard', state: result.state }
+          this.persistDashboardPrefs(result.state)
+          void this.renameSession(result.id, result.title)
+          break
+        case 'cancel':
+          this.overlay = { kind: 'dashboard', state: result.state }
+          void this.cancelSession(result.id)
+          break
+        case 'archive':
+          this.overlay = { kind: 'dashboard', state: result.state }
+          this.persistDashboardPrefs(result.state)
+          void this.archiveSession(result.id)
           break
       }
       this.requestFrame()
@@ -1358,18 +1435,29 @@ export class DeckApp {
       case 'remove-queued': void this.updateQueuedMessage(input, 'remove'); return
       case 'steer-queued': void this.updateQueuedMessage(input, 'steer'); return
       case 'dashboard': this.openDashboard(); return
-      case 'doctor': this.openDoctor(); return
+      case 'doctor':
+        if (input.trim().toLowerCase() === 'fix') this.applyDoctorFix()
+        else this.openDoctor()
+        return
       case 'vim': this.toggleVim(); return
       case 'help': this.showHelp = true; this.requestFrame(); return
       case 'quit': void this.quit(); return
     }
   }
 
-  private openInfo(title: string, lines: readonly string[]): void {
-    if (this.overlay !== undefined) return
-    if (this.pendingApprovalTarget() !== undefined) return
-    if (this.focused()?.pendingQuestion !== undefined) return
-    this.overlay = { kind: 'info', state: { title, lines: lines.length > 0 ? lines : ['Nothing to show.'], offset: 0 } }
+  private openInfo(title: string, lines: readonly string[], footer?: string): void {
+    if (this.overlay !== undefined && this.overlay.kind !== 'info') return
+    if (this.overlay === undefined) {
+      if (this.pendingApprovalTarget() !== undefined) return
+      if (this.focused()?.pendingQuestion !== undefined) return
+    }
+    const state: InfoOverlayState = {
+      title,
+      lines: lines.length > 0 ? lines : ['Nothing to show.'],
+      offset: 0,
+      ...footer === undefined ? {} : { footer },
+    }
+    this.overlay = { kind: 'info', state }
     this.requestFrame()
   }
 
@@ -1523,18 +1611,38 @@ export class DeckApp {
   private openDashboard(): void {
     if (this.overlay !== undefined) return
     this.scrollbackFocus = false
-    const state = createDashboard(this.dashboardSessions(), this.store.focusedId)
+    const prefs = loadPrefs(this.options.env ?? process.env).dashboard
+    const options = {
+      ...prefs?.grouping !== undefined ? { grouping: prefs.grouping } : {},
+      ...prefs?.pinned !== undefined ? { pinned: prefs.pinned } : {},
+      ...prefs?.pinOrder !== undefined ? { pinOrder: prefs.pinOrder } : {},
+    }
+    const state = createDashboard(this.dashboardSessions(), this.store.focusedId, options)
+    this.dashboardPrefSig = dashboardPrefSignature(state)
     this.overlay = { kind: 'dashboard', state }
     this.maybeLoadDashboardPeek(state)
     this.requestFrame()
   }
 
-  private openDoctor(): void {
+  private persistDashboardPrefs(state: DashboardState): void {
+    const sig = dashboardPrefSignature(state)
+    if (sig === this.dashboardPrefSig) return
+    this.dashboardPrefSig = sig
+    savePrefs({
+      dashboard: {
+        grouping: state.grouping,
+        pinned: [...state.pinned],
+        pinOrder: [...state.pinOrder],
+      },
+    }, this.options.env ?? process.env)
+  }
+
+  private doctorInput(): DoctorInput {
     const env = { ...(this.options.env ?? process.env) }
     if (this.vimMode) env.DECK_VIM = '1'
     else delete env.DECK_VIM
     const native = clipboardArgv()?.[0]
-    this.openInfo('doctor', doctorLines(doctorFindings({
+    return {
       caps: this.caps,
       ...this.host === undefined ? {} : { host: this.host },
       env,
@@ -1544,13 +1652,55 @@ export class DeckApp {
       isTTY: process.stdin.isTTY === true,
       cwd: this.options.cwd,
       ...native === undefined ? { clipboardRoute: 'osc52' } : { clipboardRoute: native },
-    })))
+    }
+  }
+
+  private openDoctor(): void {
+    this.openInfo('doctor', doctorLines(doctorFindings(this.doctorInput())), DOCTOR_FOOTER)
+  }
+
+  private applyDoctorFix(): void {
+    const before = this.caps
+    const hadUnicode = before.unicodeCore
+    const hadTrueColor = before.trueColor
+    const result = doctorFix(this.doctorInput())
+    before.trueColor = result.caps.trueColor
+    before.hyperlinks = result.caps.hyperlinks
+    before.kittyGraphics = result.caps.kittyGraphics
+    before.notifications = result.caps.notifications
+    before.progress = result.caps.progress
+    before.clipboard = result.caps.clipboard
+    before.syncOutput = result.caps.syncOutput
+    before.unicodeCore = result.caps.unicodeCore
+    if (!hadUnicode && result.caps.unicodeCore) this.screen.enableUnicodeCore()
+    if (hadTrueColor !== result.caps.trueColor) {
+      this.theme = createTheme(this.caps, this.options.env ?? process.env)
+    }
+    if (result.mouseEnabled !== this.mouseEnabled) {
+      this.mouseEnabled = result.mouseEnabled
+      this.screen.setMouse(result.mouseEnabled)
+    }
+    if (result.snippet.length > 0) this.copyText(result.snippet)
+    this.openInfo('doctor', doctorFixLines(result), DOCTOR_FOOTER)
+    const applied = result.applied.filter((item) => item.applied).length
+    this.notice(
+      applied > 0
+        ? `doctor fix: ${String(applied)} repair${applied === 1 ? '' : 's'}`
+        : 'doctor fix: nothing to repair in-process',
+      applied > 0 ? 'info' : 'warn',
+    )
   }
 
   private toggleVim(): void {
     this.vimMode = !this.vimMode
     if (!this.vimMode) this.scrollbackFocus = false
-    this.notice(this.vimMode ? 'vim mode on — esc parks in the transcript, i returns' : 'vim mode off', 'info')
+    else this.composerVim = 'insert'
+    this.notice(
+      this.vimMode
+        ? 'vim mode on — Esc is NORMAL, Esc again parks the transcript, i returns'
+        : 'vim mode off',
+      'info',
+    )
     this.requestFrame()
   }
 
@@ -1576,11 +1726,10 @@ export class DeckApp {
   }
 
   private maybeLoadDashboardPeek(state: DashboardState): void {
-    if (state.cursor <= 0) return
-    const row = state.sessions[state.cursor - 1]
-    if (row === undefined) return
-    const live = this.store.get(row.id)
-    if (live !== undefined && !live.historyLoaded) void this.loadHistory(row.id)
+    const row = visibleDashboardRows(state)[state.cursor]
+    if (row === undefined || row.kind !== 'session') return
+    const live = this.store.get(row.session.id)
+    if (live !== undefined && !live.historyLoaded) void this.loadHistory(row.session.id)
   }
 
   private async dashboardReply(sessionId: SessionId, text: string, attach: boolean): Promise<void> {
@@ -2186,22 +2335,31 @@ export class DeckApp {
 
   private async cancel(): Promise<void> {
     const focused = this.focused()
-    if (focused === undefined || !focused.running) {
+    if (focused === undefined) {
       this.notice('no running turn to interrupt', 'info')
       return
     }
-    const childMode = await this.subagentMode(focused)
-    if (focused.origin === 'subagent' && (focused.parentSessionId === undefined || childMode !== 'continuable')) {
+    await this.cancelSession(focused.id)
+  }
+
+  private async cancelSession(sessionId: SessionId): Promise<void> {
+    const session = this.store.get(sessionId)
+    if (session === undefined || !session.running) {
+      this.notice('no running turn to interrupt', 'info')
+      return
+    }
+    const childMode = await this.subagentMode(session)
+    if (session.origin === 'subagent' && (session.parentSessionId === undefined || childMode !== 'continuable')) {
       this.notice('this subagent cannot be interrupted', 'warn')
       return
     }
-    const result = focused.origin === 'subagent'
+    const result = session.origin === 'subagent'
       ? await this.client.call('subagent.interrupt', {
-        parentSessionId: focused.parentSessionId!,
-        childSessionId: focused.id,
+        parentSessionId: session.parentSessionId!,
+        childSessionId: session.id,
         mode: 'continuable',
       })
-      : await this.client.call('session.cancel', { sessionId: focused.id })
+      : await this.client.call('session.cancel', { sessionId: session.id })
     if (!result.ok) this.notice(`cancel failed: ${result.error.message}`, 'error')
     else this.notice('cancelled', 'info')
   }
@@ -2442,7 +2600,9 @@ export class DeckApp {
       busy: focused?.running ?? false,
       theme: this.theme,
       glyphs: this.glyphs,
-      ...this.vimMode ? { vim: this.scrollbackFocus ? 'normal' as const : 'insert' as const } : {},
+      ...this.vimMode
+        ? { vim: this.scrollbackFocus || this.composerVim === 'normal' ? 'normal' as const : 'insert' as const }
+        : {},
     })
 
     const focusedForHints = this.focused()
@@ -2510,7 +2670,10 @@ export class DeckApp {
         rows: imageLayout.imageCell.rows,
       })
     }
-    if (this.overlay === undefined && !(this.vimMode && this.scrollbackFocus)) {
+    if (
+      this.overlay === undefined
+      && !(this.vimMode && (this.scrollbackFocus || this.composerVim === 'normal'))
+    ) {
       this.screen.showCursorAt(caret.row, caret.col)
     } else {
       this.screen.hideCursor()
@@ -2725,6 +2888,10 @@ function rewindTurns(items: SessionState['transcript']['items']): { seq: number;
     turns.push({ seq: item.seq, turn, preview: preview.length > 0 ? preview : '(empty)' })
   }
   return turns
+}
+
+function dashboardPrefSignature(state: DashboardState): string {
+  return `${state.grouping}\0${state.pinned.join(',')}\0${state.pinOrder.join(',')}`
 }
 
 function parseSlashCommand(line: string): { name: string; input: string } | undefined {

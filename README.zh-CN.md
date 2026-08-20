@@ -255,12 +255,12 @@ Deck 自带的终端操作包括：
 /rewind      从某一轮用户消息 fork（Esc Esc）
 /cancel      中断当前运行中的回合
 /interrupt   /cancel 的别名
-/dashboard   驾驶舱：窥看、回复、派发（Ctrl+\\）
+/dashboard   驾驶舱：窥看、回复、派发、搜索、固定、重命名（Ctrl+\\）
 /queue       可视化编辑 / 删除 / 提升 pending 消息
 /dequeue     删除一条 pending 消息
 /steer-queued 把 queued 消息提升为 steering
-/doctor      检查终端、Host、剪贴板和 OSC 能力
-/vim-mode    切换 vim 滚动键（j/k g/G，i 回到输入）
+/doctor      检查终端、Host、剪贴板和 OSC 能力；`/doctor fix` 做进程内修复
+/vim-mode    composer vim（i/a/h/l）；Esc Esc 停到 transcript（j/k g/G）
 /status      查看项目、会话、模型、权限和 Plan 状态
 /context     查看 context window 与 token 构成
 /cost        查看 token 与 cache 用量
@@ -315,7 +315,7 @@ Deck 会自动切换到下一个会话；没有其他会话时会创建一个新
 | `Tab` | 切换到下一个会话。 |
 | `Alt+1`…`Alt+9` | 跳转到指定会话。 |
 | `Ctrl+K` | 会话管理器。 |
-| `Ctrl+\` | 驾驶舱：窥看每个会话、不切换就回复、或派发新 Agent。 |
+| `Ctrl+\` | 驾驶舱：窥看、回复、派发；`Ctrl+/` 搜索、`Ctrl+T` 固定、`Ctrl+G` 分组、`Ctrl+R` 重命名、`Ctrl+X` 停止/归档。 |
 | `Ctrl+S` | 模型、预设、权限和 Plan 模式面板。`/compact` 只在 slash 命令中。 |
 | `Ctrl+P` | 模型和推理强度选择器。 |
 | `Ctrl+N` | 新建会话。 |
@@ -332,8 +332,8 @@ Deck 会自动切换到下一个会话；没有其他会话时会创建一个新
 | `Option+B` / `Option+F` | 向左/向右移动一个单词。 |
 | `Ctrl+T` | 开关鼠标捕获。关闭后走终端原生选择。 |
 | `Ctrl+O` | 用 Kitty 图形浮层打开最近一张图片，而不是嵌在 transcript 里。 |
-| `/doctor` | 检查终端、Host、剪贴板和 OSC 能力。 |
-| `/vim-mode` | 切换 vim 滚动：`j`/`k` `g`/`G`，`i` 回到输入框。 |
+| `/doctor` | 检查终端、Host、剪贴板和 OSC 能力。`/doctor fix`（或面板里按 `f`）做进程内修复：重新打开鼠标捕获、补齐已知终端的能力开关。不会改写 shell rc，也不会升级 Node。 |
+| `/vim-mode` | composer vim：`i`/`a` 插入，`h`/`l`/`w`/`b`/`x` 移动/删除；Esc 进入 NORMAL，再 Esc 停到 transcript（`j`/`k` `g`/`G`）。 |
 | `/queue` | 可视化编辑、删除或提升 pending 消息。 |
 
 Agent 请求审批时，审批会抢占普通面板：`A`/`Y`/Enter 允许一次，

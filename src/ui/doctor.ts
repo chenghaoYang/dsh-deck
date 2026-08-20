@@ -1,6 +1,8 @@
 /**
- * Structured /doctor health report. Pure: env is `input.env ?? {}`, never
- * `process.env`. No DA1 probes — only caps, host, and env flags.
+ * Structured /doctor health report and honest in-process `/doctor fix`.
+ * Env is `input.env ?? {}`, never `process.env`. No DA1 probes — only caps,
+ * host, and env flags. Fix never rewrites shell rc, upgrades Node, creates a
+ * TTY, invents a host, persists files, or toggles vim.
  */
 
 import type { TerminalCapabilities } from '../term/capabilities.ts'
@@ -25,6 +27,23 @@ export interface DoctorInput {
   cwd: string
   /** How copy currently routes; from the app (e.g. 'pbcopy' / 'osc52' / 'wl-copy'). */
   clipboardRoute?: string
+}
+
+export interface DoctorFixItem {
+  name: string
+  applied: boolean
+  detail: string
+}
+
+export interface DoctorFixResult {
+  /** Next caps — a new object; never mutate `input.caps`. */
+  caps: TerminalCapabilities
+  mouseEnabled: boolean
+  /** Omit unless vim actually changed. `/doctor fix` does not toggle vim. */
+  vimMode?: boolean
+  snippet: string
+  applied: readonly DoctorFixItem[]
+  findings: readonly DoctorFinding[]
 }
 
 const MIN_NODE: readonly [number, number, number] = [22, 19, 0]
@@ -91,6 +110,209 @@ export function doctorLines(findings: readonly DoctorFinding[]): string[] {
     lines.push(`${finding.status.padEnd(4)} ${finding.name}  ${finding.detail}`)
   }
   return lines
+}
+
+const EDITOR_URI_EXAMPLE = "export DECK_EDITOR_URI='cursor://file{path}:{line}'"
+
+type BoolCap =
+  | 'trueColor'
+  | 'hyperlinks'
+  | 'kittyGraphics'
+  | 'notifications'
+  | 'progress'
+  | 'clipboard'
+  | 'syncOutput'
+  | 'unicodeCore'
+
+type CapKind = 'safe' | 'truecolor' | 'kitty-graphics' | 'ghostty'
+
+const CAP_FIXES: readonly {
+  key: BoolCap
+  name: string
+  kind: CapKind
+  appliedDetail: string
+}[] = [
+  { key: 'trueColor', name: 'truecolor', kind: 'truecolor', appliedDetail: '24-bit color enabled' },
+  { key: 'hyperlinks', name: 'hyperlinks', kind: 'safe', appliedDetail: 'OSC 8 enabled' },
+  { key: 'kittyGraphics', name: 'kitty graphics', kind: 'kitty-graphics', appliedDetail: 'APC graphics enabled' },
+  { key: 'notifications', name: 'notifications', kind: 'ghostty', appliedDetail: 'OSC 9 enabled' },
+  { key: 'progress', name: 'progress', kind: 'ghostty', appliedDetail: 'OSC 9;4 enabled' },
+  { key: 'clipboard', name: 'clipboard', kind: 'safe', appliedDetail: 'OSC 52 enabled' },
+  { key: 'syncOutput', name: 'sync output', kind: 'safe', appliedDetail: 'DECSET 2026 enabled' },
+  { key: 'unicodeCore', name: 'unicode core', kind: 'safe', appliedDetail: 'mode 2027 enabled' },
+]
+
+export function doctorFix(input: DoctorInput): DoctorFixResult {
+  const env = input.env ?? {}
+  const caps = cloneCaps(input.caps)
+  const items: DoctorFixItem[] = []
+  const noColor = envValue(env, 'NO_COLOR') !== undefined
+  const program = knownProgram(caps, env)
+
+  if (!versionGte(parseVersion(input.nodeVersion), MIN_NODE)) {
+    items.push({
+      name: 'node',
+      applied: false,
+      detail: `cannot upgrade Node; need ≥22.19 (have ${input.nodeVersion})`,
+    })
+  }
+  if (!input.isTTY) {
+    items.push({
+      name: 'tty',
+      applied: false,
+      detail: 'cannot create a TTY from this process',
+    })
+  }
+
+  if (program !== undefined) {
+    fillKnownTerminalCaps(caps, program, noColor, items)
+  } else {
+    skipUnknownTerminalCaps(caps, noColor, items)
+  }
+
+  let mouseEnabled = input.mouseEnabled
+  if (!mouseEnabled) {
+    mouseEnabled = true
+    items.push({ name: 'mouse', applied: true, detail: 'capture re-enabled' })
+  }
+
+  if (input.host === undefined) {
+    items.push({
+      name: 'host',
+      applied: false,
+      detail: 'cannot invent a host connection',
+    })
+  }
+
+  const editorUnset = envValue(env, 'DECK_EDITOR_URI') === undefined
+  if (editorUnset) {
+    items.push({
+      name: 'editor uri',
+      applied: false,
+      detail: 'OSC 8 stays file:// until DECK_EDITOR_URI is set',
+    })
+  }
+
+  const snippetLines: string[] = []
+  if (program === undefined) {
+    const deckCaps = unknownDeckCapsSnippet(caps, noColor)
+    if (deckCaps !== undefined) snippetLines.push(`export DECK_CAPS=${deckCaps}`)
+  }
+  if (editorUnset) snippetLines.push(EDITOR_URI_EXAMPLE)
+
+  const findings = doctorFindings({
+    ...input,
+    caps,
+    mouseEnabled,
+  })
+
+  return {
+    caps,
+    mouseEnabled,
+    snippet: snippetLines.join('\n'),
+    applied: items,
+    findings,
+  }
+}
+
+export function doctorFixLines(result: DoctorFixResult): string[] {
+  const lines = ['deck doctor fix']
+  for (const item of result.applied) {
+    const verb = item.applied ? 'fix' : 'skip'
+    lines.push(`${verb.padEnd(4)} ${item.name}  ${item.detail}`)
+  }
+  lines.push('')
+  lines.push(...doctorLines(result.findings))
+  return lines
+}
+
+function cloneCaps(caps: TerminalCapabilities): TerminalCapabilities {
+  const next: TerminalCapabilities = {
+    isGhostty: caps.isGhostty,
+    trueColor: caps.trueColor,
+    hyperlinks: caps.hyperlinks,
+    kittyGraphics: caps.kittyGraphics,
+    notifications: caps.notifications,
+    progress: caps.progress,
+    clipboard: caps.clipboard,
+    syncOutput: caps.syncOutput,
+    unicodeCore: caps.unicodeCore,
+  }
+  if (caps.termProgram !== undefined) next.termProgram = caps.termProgram
+  if (caps.termProgramVersion !== undefined) next.termProgramVersion = caps.termProgramVersion
+  return next
+}
+
+function knownProgram(
+  caps: TerminalCapabilities,
+  env: NodeJS.ProcessEnv,
+): 'ghostty' | 'kitty' | 'iterm.app' | 'wezterm' | undefined {
+  if (caps.isGhostty) return 'ghostty'
+  const program = (caps.termProgram ?? envValue(env, 'TERM_PROGRAM') ?? '').toLowerCase()
+  if (program === 'ghostty' || program === 'kitty' || program === 'iterm.app' || program === 'wezterm') {
+    return program
+  }
+  return undefined
+}
+
+function canEnableCap(
+  kind: CapKind,
+  program: 'ghostty' | 'kitty' | 'iterm.app' | 'wezterm',
+  noColor: boolean,
+): boolean {
+  if (kind === 'safe') return true
+  if (kind === 'truecolor') return !noColor
+  if (kind === 'kitty-graphics') return program === 'ghostty' || program === 'kitty'
+  return program === 'ghostty'
+}
+
+function fillKnownTerminalCaps(
+  caps: TerminalCapabilities,
+  program: 'ghostty' | 'kitty' | 'iterm.app' | 'wezterm',
+  noColor: boolean,
+  items: DoctorFixItem[],
+): void {
+  for (const fix of CAP_FIXES) {
+    if (caps[fix.key]) continue
+    if (canEnableCap(fix.kind, program, noColor)) {
+      caps[fix.key] = true
+      items.push({ name: fix.name, applied: true, detail: fix.appliedDetail })
+      continue
+    }
+    if (fix.kind === 'truecolor' && noColor) {
+      items.push({ name: fix.name, applied: false, detail: 'NO_COLOR is set' })
+    }
+  }
+}
+
+function skipUnknownTerminalCaps(
+  caps: TerminalCapabilities,
+  noColor: boolean,
+  items: DoctorFixItem[],
+): void {
+  const deckCaps = unknownDeckCapsSnippet(caps, noColor) ?? '+hyperlinks,+clipboard'
+  for (const fix of CAP_FIXES) {
+    if (caps[fix.key]) continue
+    if (fix.kind === 'truecolor' && noColor) {
+      items.push({ name: fix.name, applied: false, detail: 'NO_COLOR is set' })
+      continue
+    }
+    items.push({
+      name: fix.name,
+      applied: false,
+      detail: `unknown terminal — set DECK_CAPS=${deckCaps}`,
+    })
+  }
+}
+
+function unknownDeckCapsSnippet(caps: TerminalCapabilities, noColor: boolean): string | undefined {
+  const parts: string[] = []
+  if (!caps.hyperlinks) parts.push('+hyperlinks')
+  if (!caps.clipboard) parts.push('+clipboard')
+  if (!caps.syncOutput) parts.push('+syncOutput')
+  if (!caps.unicodeCore) parts.push('+unicodeCore')
+  if (!noColor && !caps.trueColor) parts.push('+trueColor')
+  return parts.length > 0 ? parts.join(',') : undefined
 }
 
 function nodeFinding(nodeVersion: string): DoctorFinding {

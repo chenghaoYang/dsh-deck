@@ -5,8 +5,11 @@ import type { HostDescription } from '../src/protocol/contract.ts'
 import type { TerminalCapabilities } from '../src/term/capabilities.ts'
 import {
   doctorFindings,
+  doctorFix,
+  doctorFixLines,
   doctorLines,
   type DoctorFinding,
+  type DoctorFixItem,
   type DoctorInput,
 } from '../src/ui/doctor.ts'
 
@@ -241,5 +244,179 @@ describe('doctor', () => {
     })
     const findings = doctorFindings(rest)
     assert.equal(byName(findings, 'clipboard').status, 'warn')
+  })
+})
+
+const GHOSTTY_FILL = [
+  'hyperlinks',
+  'truecolor',
+  'clipboard',
+  'sync output',
+  'unicode core',
+  'kitty graphics',
+  'progress',
+  'notifications',
+  'mouse',
+] as const
+
+function offCaps(over: Partial<TerminalCapabilities> = {}): TerminalCapabilities {
+  return {
+    isGhostty: false,
+    trueColor: false,
+    hyperlinks: false,
+    kittyGraphics: false,
+    notifications: false,
+    progress: false,
+    clipboard: false,
+    syncOutput: false,
+    unicodeCore: false,
+    ...over,
+  }
+}
+
+function appliedByName(items: readonly DoctorFixItem[], name: string): DoctorFixItem {
+  const found = items.find((item) => item.name === name)
+  assert.ok(found, `missing fix item ${name}`)
+  return found
+}
+
+describe('doctorFix', () => {
+  it('Ghostty with all caps off + mouse off applies known-terminal fill; findings become ok', () => {
+    const caps = ghosttyCaps({
+      trueColor: false,
+      hyperlinks: false,
+      kittyGraphics: false,
+      notifications: false,
+      progress: false,
+      clipboard: false,
+      syncOutput: false,
+      unicodeCore: false,
+    })
+    const result = doctorFix(baseInput({
+      caps,
+      mouseEnabled: false,
+      env: {
+        TERM: 'xterm-ghostty',
+        TERM_PROGRAM: 'ghostty',
+        DECK_EDITOR_URI: 'cursor://file{path}:{line}',
+      },
+    }))
+    assert.equal(result.mouseEnabled, true)
+    assert.equal(result.caps.trueColor, true)
+    assert.equal(result.caps.hyperlinks, true)
+    assert.equal(result.caps.clipboard, true)
+    assert.equal(result.caps.syncOutput, true)
+    assert.equal(result.caps.unicodeCore, true)
+    assert.equal(result.caps.kittyGraphics, true)
+    assert.equal(result.caps.progress, true)
+    assert.equal(result.caps.notifications, true)
+    for (const name of GHOSTTY_FILL) {
+      const item = appliedByName(result.applied, name)
+      assert.equal(item.applied, true)
+      assert.equal(byName(result.findings, name).status, 'ok')
+    }
+    assert.equal(appliedByName(result.applied, 'mouse').detail, 'capture re-enabled')
+    assert.equal(result.snippet, '')
+    assert.ok(!('vimMode' in result))
+  })
+
+  it('NO_COLOR set → truecolor NOT applied', () => {
+    const result = doctorFix(baseInput({
+      caps: ghosttyCaps({
+        trueColor: false,
+        hyperlinks: false,
+        kittyGraphics: false,
+        notifications: false,
+        progress: false,
+        clipboard: false,
+        syncOutput: false,
+        unicodeCore: false,
+      }),
+      mouseEnabled: false,
+      env: { TERM: 'xterm-ghostty', TERM_PROGRAM: 'ghostty', NO_COLOR: '1' },
+    }))
+    assert.equal(result.caps.trueColor, false)
+    const truecolor = result.applied.find((item) => item.name === 'truecolor')
+    assert.ok(truecolor === undefined || truecolor.applied === false)
+    assert.equal(byName(result.findings, 'truecolor').status, 'off')
+    assert.equal(appliedByName(result.applied, 'hyperlinks').applied, true)
+    assert.equal(result.caps.hyperlinks, true)
+  })
+
+  it('kitty: kittyGraphics applied, progress NOT applied', () => {
+    const result = doctorFix(baseInput({
+      caps: offCaps({ termProgram: 'kitty' }),
+      env: { TERM: 'xterm-kitty', TERM_PROGRAM: 'kitty' },
+      mouseEnabled: true,
+    }))
+    assert.equal(appliedByName(result.applied, 'kitty graphics').applied, true)
+    assert.equal(result.caps.kittyGraphics, true)
+    assert.equal(result.caps.progress, false)
+    assert.equal(result.caps.notifications, false)
+    assert.ok(!result.applied.some((item) => item.name === 'progress' && item.applied))
+    assert.ok(!result.applied.some((item) => item.name === 'notifications' && item.applied))
+    assert.equal(result.caps.hyperlinks, true)
+    assert.equal(result.caps.unicodeCore, true)
+  })
+
+  it('unknown TERM=dumb: no fake caps; snippet mentions DECK_CAPS', () => {
+    const caps = offCaps()
+    const result = doctorFix(baseInput({
+      caps,
+      env: { TERM: 'dumb' },
+    }))
+    assert.equal(result.caps.hyperlinks, false)
+    assert.equal(result.caps.trueColor, false)
+    assert.equal(result.caps.clipboard, false)
+    assert.equal(result.caps.kittyGraphics, false)
+    assert.equal(result.caps.progress, false)
+    assert.match(result.snippet, /DECK_CAPS/)
+    assert.match(result.snippet, /\+hyperlinks/)
+    assert.match(result.snippet, /\+clipboard/)
+    assert.equal(appliedByName(result.applied, 'hyperlinks').applied, false)
+    assert.equal(appliedByName(result.applied, 'clipboard').applied, false)
+  })
+
+  it('editor uri unset → skip + snippet contains DECK_EDITOR_URI', () => {
+    const result = doctorFix(baseInput())
+    const editor = appliedByName(result.applied, 'editor uri')
+    assert.equal(editor.applied, false)
+    assert.match(editor.detail, /file:\/\//)
+    assert.match(result.snippet, /DECK_EDITOR_URI/)
+    assert.match(result.snippet, /cursor:\/\/file\{path\}:\{line\}/)
+  })
+
+  it('node old version → skip node, still in findings as warn', () => {
+    const result = doctorFix(baseInput({ nodeVersion: 'v18.20.4' }))
+    const node = appliedByName(result.applied, 'node')
+    assert.equal(node.applied, false)
+    assert.match(node.detail, /cannot upgrade Node/)
+    assert.equal(byName(result.findings, 'node').status, 'warn')
+    assert.match(byName(result.findings, 'node').detail, /18/)
+  })
+
+  it('does not mutate input.caps', () => {
+    const caps = ghosttyCaps({ hyperlinks: false, trueColor: false })
+    Object.freeze(caps)
+    const input = baseInput({ caps, mouseEnabled: false })
+    Object.freeze(input)
+    const result = doctorFix(input)
+    assert.notEqual(result.caps, caps)
+    assert.equal(caps.hyperlinks, false)
+    assert.equal(caps.trueColor, false)
+    assert.equal(input.mouseEnabled, false)
+    assert.equal(result.caps.hyperlinks, true)
+    assert.equal(result.caps.trueColor, true)
+    assert.equal(result.mouseEnabled, true)
+  })
+
+  it('doctorFixLines contains `deck doctor fix` and `fix  mouse`', () => {
+    const result = doctorFix(baseInput({ mouseEnabled: false }))
+    const lines = doctorFixLines(result)
+    assert.equal(lines[0], 'deck doctor fix')
+    assert.ok(lines.some((line) => line.includes('fix  mouse')))
+    const blank = lines.indexOf('')
+    assert.ok(blank > 0)
+    assert.equal(lines[blank + 1], 'deck doctor')
   })
 })

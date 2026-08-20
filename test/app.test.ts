@@ -49,8 +49,10 @@ interface AppInternals {
   onOverlayKey(overlay: unknown, key: Key): void
   onKey(key: Key): void
   vimMode: boolean
+  composerVim: 'insert' | 'normal'
   scrollbackFocus: boolean
   scrollOffset: number
+  mouseEnabled: boolean
 }
 
 function internals(app: DeckApp): AppInternals {
@@ -716,6 +718,25 @@ describe('DeckApp common dsh controls', () => {
     assert.ok(overlay.state?.lines.some((line) => line.includes('host')))
   })
 
+  it('/doctor fix and f apply in-process repairs without mutating vim', () => {
+    const view = focusedRunningApp()
+    view.mouseEnabled = false
+    view.vimMode = false
+    view.runDeckCommand('doctor', 'fix')
+    const overlay = view.overlay as { kind?: string; state?: InfoOverlayState }
+    assert.equal(overlay.kind, 'info')
+    assert.equal(overlay.state?.lines[0], 'deck doctor fix')
+    assert.ok(overlay.state?.lines.some((line) => /fix\s+mouse/.test(line)))
+    assert.equal(view.mouseEnabled, true)
+    assert.equal(view.vimMode, false)
+    view.overlay = undefined
+    view.runDeckCommand('doctor')
+    assert.ok(view.overlay !== undefined)
+    view.onOverlayKey(view.overlay, { kind: 'char', char: 'f' })
+    const again = view.overlay as { kind?: string; state?: InfoOverlayState }
+    assert.equal(again.state?.lines[0], 'deck doctor fix')
+  })
+
   it('/vim-mode parks printable keys in the transcript until i', () => {
     const view = focusedRunningApp()
     view.draft = ''
@@ -724,6 +745,9 @@ describe('DeckApp common dsh controls', () => {
     view.scrollbackFocus = false
     view.runDeckCommand('vim')
     assert.equal(view.vimMode, true)
+    view.onKey({ kind: 'escape' })
+    assert.equal(view.composerVim, 'normal')
+    assert.equal(view.scrollbackFocus, false)
     view.onKey({ kind: 'escape' })
     assert.equal(view.scrollbackFocus, true)
     view.onKey({ kind: 'char', char: 'j' })
@@ -767,6 +791,45 @@ describe('DeckApp common dsh controls', () => {
     const payload = prompt.payload as { sessionId?: string; content?: { text?: string }[] }
     assert.equal(payload.sessionId, 'session-control')
     assert.equal(payload.content?.[0]?.text, 'hi')
+  })
+
+  it('dashboard Ctrl+R renames the selected session', async () => {
+    const view = focusedRunningApp()
+    const calls: { method: string; payload: unknown }[] = []
+    view.client.call = async (method, payload) => {
+      calls.push({ method, payload })
+      if (method === 'session.history') return { ok: true, value: { events: [], hasMore: false } }
+      if (method === 'session.rename') return { ok: true, value: { title: 'new title', seq: 1 } }
+      return { ok: true, value: { accepted: true } }
+    }
+    view.runDeckCommand('dashboard')
+    const overlay = view.overlay
+    assert.ok(overlay !== undefined)
+    view.onOverlayKey(overlay, { kind: 'ctrl', char: 'r' })
+    view.onOverlayKey(view.overlay, { kind: 'ctrl', char: 'u' })
+    for (const ch of 'new title') view.onOverlayKey(view.overlay, { kind: 'char', char: ch })
+    view.onOverlayKey(view.overlay, { kind: 'enter' })
+    await new Promise((resolve) => setImmediate(resolve))
+    const rename = calls.find((call) => call.method === 'session.rename')
+    assert.deepEqual(rename?.payload, { sessionId: 'session-control', title: 'new title' })
+    assert.equal((view.overlay as { kind?: string } | undefined)?.kind, 'dashboard')
+  })
+
+  it('dashboard Ctrl+X cancels the running selected session', async () => {
+    const view = focusedRunningApp()
+    const calls: { method: string; payload: unknown }[] = []
+    view.client.call = async (method, payload) => {
+      calls.push({ method, payload })
+      if (method === 'session.history') return { ok: true, value: { events: [], hasMore: false } }
+      return { ok: true, value: { accepted: true } }
+    }
+    view.runDeckCommand('dashboard')
+    const overlay = view.overlay
+    assert.ok(overlay !== undefined)
+    view.onOverlayKey(overlay, { kind: 'ctrl', char: 'x' })
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.ok(calls.some((call) => call.method === 'session.cancel'))
+    assert.equal((view.overlay as { kind?: string } | undefined)?.kind, 'dashboard')
   })
 
   it('answers an approval for an archived background session', async () => {

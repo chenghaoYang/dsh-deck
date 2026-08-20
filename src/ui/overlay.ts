@@ -514,6 +514,7 @@ export interface InfoOverlayState {
   title: string
   lines: readonly string[]
   offset?: number
+  footer?: string
 }
 
 export function renderInfoOverlay(
@@ -537,7 +538,10 @@ export function renderInfoOverlay(
       body.push({ spans: [{ text: wrapped, style: theme.text }] })
     }
   }
-  paintFloatingPanel(target, panel, theme, glyphs, state.title, body, '↑↓ scroll · ⏎/esc close')
+  const footer = state.footer !== undefined && state.footer.length > 0
+    ? state.footer
+    : '↑↓ scroll · ⏎/esc close'
+  paintFloatingPanel(target, panel, theme, glyphs, state.title, body, footer)
 }
 
 // ---------------------------------------------------------------------------

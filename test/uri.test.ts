@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { fileHref, linkableFilePath } from '../src/term/uri.ts'
+import { fileHref, linkableFilePath, linkifyPathRuns } from '../src/term/uri.ts'
 
 const noTmpl: NodeJS.ProcessEnv = {}
 
@@ -57,5 +57,55 @@ describe('linkableFilePath', () => {
     assert.equal(linkableFilePath('https://example.com/x.ts'), false)
     assert.equal(linkableFilePath('file.ts?x=1'), false)
     assert.equal(linkableFilePath('foo'), false)
+  })
+})
+
+describe('linkifyPathRuns', () => {
+  function hrefs(text: string): string[] {
+    return linkifyPathRuns(text, noTmpl)
+      .filter((run) => run.href !== undefined)
+      .map((run) => run.href ?? '')
+  }
+
+  it('returns no runs for empty text', () => {
+    assert.deepEqual(linkifyPathRuns(''), [])
+  })
+
+  it('links a bare path token and preserves surrounding text', () => {
+    const input = 'see src/ui/app.ts please'
+    const runs = linkifyPathRuns(input, noTmpl)
+    assert.equal(runs.map((run) => run.text).join(''), input)
+    const linked = runs.filter((run) => run.href !== undefined)
+    assert.equal(linked.length, 1)
+    assert.equal(linked[0]?.text, 'src/ui/app.ts')
+    assert.match(linked[0]?.href ?? '', /file:\/\//)
+    assert.match(linked[0]?.href ?? '', /app\.ts/)
+  })
+
+  it('links only the inner path of a backtick wrap', () => {
+    const input = 'see `src/ui/app.ts`'
+    const runs = linkifyPathRuns(input, noTmpl)
+    assert.equal(runs.map((run) => run.text).join(''), input)
+    const linked = runs.filter((run) => run.href !== undefined)
+    assert.equal(linked.length, 1)
+    assert.equal(linked[0]?.text, 'src/ui/app.ts')
+    assert.match(linked[0]?.href ?? '', /app\.ts/)
+    assert.ok(runs.some((run) => run.text.includes('`') && run.href === undefined))
+  })
+
+  it('does not link command words, URLs, or bare names', () => {
+    assert.deepEqual(hrefs('ls src'), [])
+    assert.deepEqual(hrefs('https://example.com/x.ts'), [])
+    assert.deepEqual(hrefs('foo'), [])
+  })
+
+  it('links path:line with a line fragment', () => {
+    const runs = linkifyPathRuns('src/ui/app.ts:12', noTmpl)
+    assert.equal(runs.length, 1)
+    assert.equal(runs[0]?.text, 'src/ui/app.ts:12')
+    const href = runs[0]?.href
+    assert.ok(href)
+    assert.match(href, /app\.ts/)
+    assert.match(href, /#L12/)
   })
 })

@@ -172,6 +172,12 @@ export class Screen {
     this.#write(enabled ? MOUSE_ON : MOUSE_OFF)
   }
 
+  /** Enable mode 2027 after startup, e.g. `/doctor fix` filling unicodeCore. */
+  enableUnicodeCore(): void {
+    if (!this.#opened || this.#closed) return
+    this.#write('\u001b[?2027h')
+  }
+
   onResize(listener: (columns: number, rows: number) => void): () => void {
     this.#resizeListeners.add(listener)
     return () => {

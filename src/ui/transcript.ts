@@ -8,7 +8,7 @@
  */
 
 import { stringWidth, truncate } from '../term/width.ts'
-import { fileHref, linkableFilePath } from '../term/uri.ts'
+import { fileHref, linkableFilePath, linkifyPathRuns } from '../term/uri.ts'
 import type { TranscriptItem, ToolCallEntry } from '../model/fold.ts'
 import type { QueuedInboxItem, TokenUsage } from '../protocol/contract.ts'
 import type { Theme, Glyphs } from './theme.ts'
@@ -338,13 +338,9 @@ function layoutQueued(
     return makeLine([{ text: truncate(prefix.trimEnd(), width), style: options.theme.dim }], width)
   }
   const preview = truncate(queuedPreview(item), width - prefixW)
-  return makeLine(
-    [
-      { text: prefix, style: options.theme.dim },
-      { text: preview, style: options.theme.dim },
-    ],
-    width,
-  )
+  const spans: Span[] = [{ text: prefix, style: options.theme.dim }]
+  spans.push(...styledPathSpans(preview, options.theme.dim))
+  return makeLine(spans, width)
 }
 
 function layoutRetrying(
@@ -505,7 +501,10 @@ function parseInline(text: string, baseStyle: string, theme: Theme): Span[] {
       const end = text.indexOf('`', i + 1)
       if (end > i + 1) {
         flush(baseStyle)
-        spans.push({ text: text.slice(i + 1, end), style: theme.subtle })
+        const inner = text.slice(i + 1, end)
+        const span: Span = { text: inner, style: theme.subtle }
+        if (linkableFilePath(inner)) span.link = fileHref(inner)
+        spans.push(span)
         i = end + 1
         continue
       }
@@ -690,26 +689,34 @@ function hanging(
 ): RenderedLine[] {
   const prefixW = stringWidth(prefix)
   if (prefixW === 0) {
-    return wrapLines(text, width).map((row) => makeLine([{ text: row, style: bodyStyle }], width))
+    return wrapLines(text, width).map((row) => makeLine(styledPathSpans(row, bodyStyle), width))
   }
   if (prefixW >= width) {
     const head = makeLine([{ text: clipToWidth(prefix, width).text, style: prefixStyle }], width)
-    const rest = wrapLines(text, width).map((row) => makeLine([{ text: row, style: bodyStyle }], width))
+    const rest = wrapLines(text, width).map((row) => makeLine(styledPathSpans(row, bodyStyle), width))
     return [head, ...rest]
   }
   const inner = width - prefixW
   const body = wrapLines(text, inner)
   const indent = ' '.repeat(prefixW)
   const shown = body.length > 0 ? body : ['']
-  return shown.map((row, i) =>
-    makeLine(
-      [
-        { text: i === 0 ? prefix : indent, style: i === 0 ? prefixStyle : '' },
-        { text: row, style: bodyStyle },
-      ],
-      width,
-    ),
-  )
+  return shown.map((row, i) => {
+    const spans: Span[] = [
+      { text: i === 0 ? prefix : indent, style: i === 0 ? prefixStyle : '' },
+    ]
+    spans.push(...styledPathSpans(row, bodyStyle))
+    return makeLine(spans, width)
+  })
+}
+
+function styledPathSpans(text: string, style: string): Span[] {
+  const spans: Span[] = []
+  for (const run of linkifyPathRuns(text)) {
+    const span: Span = { text: run.text, style }
+    if (run.href !== undefined) span.link = run.href
+    spans.push(span)
+  }
+  return spans
 }
 
 function clipPrefix(prefix: string, width: number): string {

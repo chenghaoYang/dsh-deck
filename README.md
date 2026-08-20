@@ -108,7 +108,9 @@ stopped and is waiting on you.
   importantly — what is **blocked on your approval**. An agent waiting for a
   permission you cannot see is indistinguishable from a hang. `ctrl+\` opens
   the dashboard: peek the selected agent's latest output, reply without
-  switching, or dispatch a new session from the same panel.
+  switching, dispatch a new session, search (`ctrl+/`), pin (`ctrl+t`), or
+  rename (`ctrl+r`). Idle extras fold; `ctrl+x` cancels a running turn or
+  archives an idle one.
 - **Project identity stays visible.** The header shows
   `project / session title`, so similarly named sessions from different
   workspaces do not lose their context.
@@ -129,9 +131,13 @@ stopped and is waiting on you.
   unsupported: progress in the tab/taskbar while an agent works, a desktop
   notification when an agent needs you, clipboard copy of an answer straight out
   of the terminal. Images in a session open with `ctrl+o` as a Kitty graphics
-  overlay; they are not drawn inline in the transcript. Tool-call file paths
-  are OSC 8 hyperlinks (`DECK_EDITOR_URI` to open them in an editor). `/doctor`
-  reports which of these the current terminal actually supports.
+  overlay; they are not drawn inline in the transcript. File paths in tool
+  headlines and in user/assistant text (including backtick paths) are OSC 8
+  hyperlinks (`DECK_EDITOR_URI` to open them in an editor). `/doctor` reports
+  which of these the current terminal actually supports; `/doctor fix` (or `f`
+  on that panel) applies in-process repairs such as re-enabling mouse capture
+  and filling known-terminal capability flags. It does not rewrite your shell
+  rc or upgrade Node.
 - **Your conversation stays in your scrollback.** A full-screen TUI draws on the
   alternate screen and vanishes on exit; Deck writes a compact transcript back to
   the primary screen on quit, with semantic prompt marks so your terminal's
@@ -305,7 +311,9 @@ alive where a pipe would have hit EOF.
 ### Keys
 
 Printable characters **always** go to the composer — no letter is ever a
-command, so you can type "add tests" without triggering anything.
+command, so you can type "add tests" without triggering anything. `/vim-mode`
+is the exception: Esc enters composer NORMAL (`h`/`l`/`w`/`b`/`x`), Esc again
+parks in the transcript (`j`/`k` `g`/`G`), and `i` returns to INSERT.
 
 | Key | |
 |---|---|
@@ -318,10 +326,10 @@ command, so you can type "add tests" without triggering anything.
 | `ctrl+s` | modes: model, agent preset, permission, plan |
 | `ctrl+p` | model and reasoning effort |
 | `ctrl+k` | session manager: search, archive, rename, or create |
-| `ctrl+\` | dashboard: peek every session, reply without switching, or dispatch a new one |
+| `ctrl+\` | dashboard: peek, reply, dispatch; `ctrl+/` search, `ctrl+t` pin, `ctrl+g` group, `ctrl+r` rename, `ctrl+x` stop |
 | `/queue` | visual list of pending messages — edit, remove, or promote to steering |
-| `/doctor` | terminal, host, clipboard, and OSC capability report |
-| `/vim-mode` | park in the transcript (`j`/`k` `g`/`G`); `i` returns to the composer |
+| `/doctor` | capability report; `/doctor fix` (or `f`) applies in-process repairs |
+| `/vim-mode` | composer vim (`i`/`a`/`h`/`l`); Esc Esc parks the transcript (`j`/`k` `g`/`G`) |
 | `backspace` / `delete` / `ctrl+d` in session manager | confirm archive when the search box is empty (conversation log is kept) |
 | `ctrl+f` | fork the session |
 | `esc esc` | rewind: fork at a previous user turn |
@@ -395,7 +403,7 @@ Deck provides `/model`, `/effort`, `/modes`, `/preset`, `/permissions`,
 `/sessions`, `/resume`, `/archive`, `/new`, `/clear`, `/rename`, `/fork`,
 `/rewind`,
 `/cancel`, `/interrupt`, `/dashboard`, `/queue`, `/dequeue`, `/steer-queued`,
-`/doctor`, `/vim-mode`, `/status`,
+`/doctor` (`/doctor fix`), `/vim-mode`, `/status`,
 `/context`, `/cost`, `/tokens`, `/search`, `/skills`, `/agents`,
 `/interrupt-agent`, `/workspaces`, `/help`, and `/exit` (`/q`). A standard dsh host
 currently adds commands such as `/compact`,

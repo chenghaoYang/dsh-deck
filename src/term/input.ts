@@ -312,7 +312,7 @@ export class InputReader {
       }
       if (first < 0x20) {
         this.#buf = this.#buf.slice(1)
-        this.#emit({ kind: 'ctrl', char: String.fromCharCode(first + 96) })
+        this.#emit({ kind: 'ctrl', char: c0CtrlChar(first) })
         continue
       }
 
@@ -411,6 +411,7 @@ export class InputReader {
         this.#emitBackspace(modifier)
         return
       }
+      if (this.#dispatchCsiUPrintable(code, modifier)) return
     }
     const kind = CSI_NAV[final]
     if (kind !== undefined) {
@@ -418,6 +419,40 @@ export class InputReader {
       return
     }
     this.#emit({ kind: 'unknown', raw })
+  }
+
+  /**
+   * Printable Kitty/Ghostty CSI-u. Modifier bits start at 1: shift=1, alt=2,
+   * ctrl=4, super=8. Shift is already in the code point when the terminal
+   * reports a shifted glyph — do not apply it again.
+   */
+  #dispatchCsiUPrintable(code: number, modifier: number): boolean {
+    if (!Number.isInteger(code) || code < 32 || code > 0x10ffff) return false
+    if (code >= 0xd800 && code <= 0xdfff) return false
+    const bits = Number.isFinite(modifier) ? Math.max(0, modifier - 1) : 0
+    const ctrl = (bits & 4) !== 0
+    const alt = (bits & 2) !== 0
+    if (ctrl && code === 47) {
+      this.#emit({ kind: 'ctrl', char: '/' })
+      return true
+    }
+    if (ctrl && code === 92) {
+      this.#emit({ kind: 'ctrl', char: '|' })
+      return true
+    }
+    if (ctrl && ((code >= 97 && code <= 122) || (code >= 65 && code <= 90))) {
+      this.#emit({ kind: 'ctrl', char: String.fromCharCode(code).toLowerCase() })
+      return true
+    }
+    if (alt && !ctrl) {
+      this.#emit({ kind: 'alt', char: String.fromCodePoint(code) })
+      return true
+    }
+    if (!ctrl && !alt) {
+      this.#emit({ kind: 'char', char: String.fromCodePoint(code) })
+      return true
+    }
+    return false
   }
 }
 
@@ -470,6 +505,13 @@ function parseSgrMouse(params: string, final: string): Key | 'discard' | undefin
 
   const action: 'down' | 'up' | 'drag' = final === 'm' ? 'up' : motion ? 'drag' : 'down'
   return { kind: 'mouse', action, button, row, col, shift, alt, ctrl }
+}
+
+/** Map a C0 byte to the ctrl-char the rest of the app matches on. */
+function c0CtrlChar(first: number): string {
+  if (first === 0x1c) return '|'
+  if (first === 0x1f) return '/'
+  return String.fromCharCode(first + 96)
 }
 
 function parseDec(text: string): number | undefined {

@@ -287,3 +287,47 @@ describe('macOS keyboard input', () => {
     assert.deepEqual(keys, [{ kind: 'unknown', raw: `${ESC}[13~` }])
   })
 })
+
+describe('ctrl C0 and CSI-u printables', () => {
+  it('maps US (0x1f) to ctrl slash and keeps FS as ctrl pipe', async () => {
+    const input = new Readable({ read() {} })
+    const { reader, keys } = collect(input)
+    input.push('\x1f')
+    input.push('\x1c')
+    input.push('\x03')
+    await new Promise((r) => setImmediate(r))
+    reader.stop()
+    assert.deepEqual(keys, [
+      { kind: 'ctrl', char: '/' },
+      { kind: 'ctrl', char: '|' },
+      { kind: 'ctrl', char: 'c' },
+    ])
+  })
+
+  it('decodes CSI-u slash, letter, and Return', async () => {
+    const input = new Readable({ read() {} })
+    const { reader, keys } = collect(input)
+    input.push(`${ESC}[47;5u`)
+    input.push(`${ESC}[97;1u`)
+    input.push(`${ESC}[13;1u`)
+    await new Promise((r) => setImmediate(r))
+    reader.stop()
+    assert.deepEqual(keys, [
+      { kind: 'ctrl', char: '/' },
+      { kind: 'char', char: 'a' },
+      { kind: 'enter' },
+    ])
+  })
+
+  it('holds an incomplete CSI-u until the final byte', async () => {
+    const input = new Readable({ read() {} })
+    const { reader, keys } = collect(input)
+    input.push(`${ESC}[47;5`)
+    await new Promise((r) => setImmediate(r))
+    assert.equal(keys.length, 0)
+    input.push('u')
+    await new Promise((r) => setImmediate(r))
+    reader.stop()
+    assert.deepEqual(keys, [{ kind: 'ctrl', char: '/' }])
+  })
+})
