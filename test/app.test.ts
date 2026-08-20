@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
 import { DeckApp } from '../src/ui/app.ts'
 import { DeckStore } from '../src/model/store.ts'
 import type { Key } from '../src/term/input.ts'
@@ -612,7 +616,12 @@ describe('DeckApp session management', () => {
 
 describe('DeckApp common dsh controls', () => {
   function focusedRunningApp(): AppInternals {
-    const app = new DeckApp({ baseUrl: 'http://127.0.0.1:3080', cwd: '/work/demo' })
+    const home = mkdtempSync(join(tmpdir(), 'deck-app-'))
+    const app = new DeckApp({
+      baseUrl: 'http://127.0.0.1:3080',
+      cwd: '/work/demo',
+      env: { ...process.env, DECK_HOME: home },
+    })
     const view = internals(app)
     view.store.applySessionList([{
       sessionId: 'session-control',

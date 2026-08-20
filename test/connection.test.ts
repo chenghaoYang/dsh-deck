@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
+import { createServer } from 'node:http'
 import { after, afterEach, describe, it } from 'node:test'
 import { DeckClient } from '../src/protocol/client.ts'
 import { Connection, type ConnectionState } from '../src/protocol/connection.ts'
 import { HOST_EVENTS_PATH, MUX_EVENTS_PATH, type HostDescription } from '../src/protocol/contract.ts'
+import { isRecord, readJson } from './helpers/protocol.ts'
 
 const HOST: HostDescription = {
   version: '0.0.1',
@@ -85,18 +86,6 @@ function installFakeWebSocket(): void {
 function restoreWebSocket(): void {
   globalThis.WebSocket = originalWebSocket
   FakeWebSocket.reset()
-}
-
-async function readJson(req: IncomingMessage): Promise<unknown> {
-  const chunks: Buffer[] = []
-  for await (const chunk of req) {
-    chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk)
-  }
-  return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null
 }
 
 async function startDescribeServer(
@@ -381,9 +370,59 @@ describe('Connection', () => {
     const socketsAtClose = FakeWebSocket.instances.length
     conn.close()
     assert.equal(conn.state, 'closed')
-    await new Promise<void>((resolve) => setTimeout(resolve, 400))
+    await tick()
     assert.equal(FakeWebSocket.instances.length, socketsAtClose)
     assert.deepEqual(losts, [])
+  })
+
+  it('restart after close runs exactly one loop and keeps the new generation alive', async () => {
+    installFakeWebSocket()
+    const { url, close } = await startDescribeServer(() => ({ ok: true }))
+    after(() => close())
+
+    const readies: number[] = []
+    const conn = new Connection(new DeckClient({ baseUrl: url }), url, {
+      ready: (_host, gen) => { readies.push(gen) },
+    })
+    conn.start()
+    await waitFor(() => FakeWebSocket.instances.length === 2, 1_000, 'gen1 sockets')
+    for (const socket of FakeWebSocket.instances) socket.open()
+    await waitFor(() => conn.state === 'ready', 1_000, 'gen1 ready')
+
+    // Restart in the same tick while the old loop is suspended in whenAborted:
+    // the stale loop must not spawn sockets of its own nor tear down gen2.
+    conn.close()
+    for (const socket of FakeWebSocket.instances) socket.open()
+    conn.start()
+    await waitFor(() => FakeWebSocket.instances.length === 4, 1_000, 'gen2 sockets')
+    await tick()
+    assert.equal(FakeWebSocket.instances.length, 4, 'stale loop must not open sockets')
+
+    const gen2 = FakeWebSocket.instances.slice(2)
+    for (const socket of gen2) socket.open()
+    await waitFor(() => conn.state === 'ready', 1_000, 'gen2 ready')
+    assert.deepEqual(readies, [1, 2])
+    assert.equal(conn.generation, 2)
+    conn.close()
+  })
+
+  it('reports the real describe failure as the reconnect reason', async () => {
+    installFakeWebSocket()
+    const { url, close } = await startDescribeServer(() => ({ ok: false, code: 'internal', message: 'boom' }))
+    after(() => close())
+
+    const reconnectDetails: string[] = []
+    const conn = new Connection(new DeckClient({ baseUrl: url }), url, {
+      state: (state, detail) => {
+        if (state === 'reconnecting' && detail !== undefined) reconnectDetails.push(detail)
+      },
+    })
+    conn.start()
+    await waitFor(() => FakeWebSocket.instances.length === 2, 1_000, 'sockets')
+    for (const socket of FakeWebSocket.instances) socket.open()
+    await waitFor(() => reconnectDetails.length > 0, 1_000, 'reconnecting with reason')
+    assert.match(reconnectDetails[0] ?? '', /host\.describe failed: internal: boom/)
+    conn.close()
   })
 
   it('isolates a throwing event handler', async () => {

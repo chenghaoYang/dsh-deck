@@ -211,6 +211,14 @@ describe('createDashboard', () => {
     assert.equal(missing.cursor, 1)
   })
 
+  it('expands idle fold so a focused older idle stays selected', () => {
+    const state = createDashboard(idleCatalog(12), 'i0')
+    assert.equal(state.idleExpanded, true)
+    const row = visibleDashboardRows(state)[state.cursor]
+    assert.equal(row?.kind, 'session')
+    if (row?.kind === 'session') assert.equal(row.session.id, 'i0')
+  })
+
   it('starts on the dispatch row when there are no sessions', () => {
     const state = createDashboard([])
     assert.equal(state.focus, 'input')

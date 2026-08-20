@@ -57,6 +57,9 @@ describe('linkableFilePath', () => {
     assert.equal(linkableFilePath('https://example.com/x.ts'), false)
     assert.equal(linkableFilePath('file.ts?x=1'), false)
     assert.equal(linkableFilePath('foo'), false)
+    assert.equal(linkableFilePath('OK.'), false)
+    assert.equal(linkableFilePath('e.g.'), false)
+    assert.equal(linkableFilePath('3.14'), false)
   })
 })
 
@@ -97,6 +100,7 @@ describe('linkifyPathRuns', () => {
     assert.deepEqual(hrefs('ls src'), [])
     assert.deepEqual(hrefs('https://example.com/x.ts'), [])
     assert.deepEqual(hrefs('foo'), [])
+    assert.deepEqual(hrefs('OK. sure'), [])
   })
 
   it('links path:line with a line fragment', () => {

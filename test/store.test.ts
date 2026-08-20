@@ -239,8 +239,11 @@ describe('mux events and history overlap', () => {
     ]
     const store = new DeckStore()
     store.applyHistoryPage('s', events.map((event): HistoryEntry => ({ event })), false)
-    store.applyMux({ type: 'session/event', sessionId: 's', event: events[2]! }, 'r')
-    store.applyMux({ type: 'session/event', sessionId: 's', event: events[3]! }, 'r')
+    const chunk = events[2]
+    const message = events[3]
+    assert.ok(chunk !== undefined && message !== undefined)
+    store.applyMux({ type: 'session/event', sessionId: 's', event: chunk }, 'r')
+    store.applyMux({ type: 'session/event', sessionId: 's', event: message }, 'r')
     await flush()
     const items = store.get('s')?.transcript.items ?? []
     assert.equal(items.filter((item) => item.kind === 'user').length, 1)
@@ -392,6 +395,26 @@ describe('approvals, host frames, reset', () => {
     await flush()
     assert.equal(store.get('s'), undefined)
     assert.equal(store.sessions.length, 0)
+  })
+
+  it('drops projections and model selection so a reused session id starts clean', async () => {
+    const store = new DeckStore()
+    store.applyHost({ type: 'host/session-added', sessionId: 's', blank: true }, 'r')
+    store.applyModelSelection('s', { provider: 'nvidia', model: 'old' })
+    store.applyMux({
+      type: 'session/projection', sessionId: 's', key: 'title', value: 'Old title', seq: 9,
+    }, 'r')
+    await flush()
+    assert.equal(store.get('s')?.title, 'Old title')
+
+    store.applyHost({ type: 'host/session-removed', sessionId: 's' }, 'r')
+    store.applyHost({ type: 'host/session-added', sessionId: 's', blank: true }, 'r')
+    store.applyMux({
+      type: 'session/projection', sessionId: 's', key: 'title', value: 'New title', seq: 1,
+    }, 'r')
+    await flush()
+    assert.equal(store.get('s')?.title, 'New title')
+    assert.equal(store.get('s')?.modes.model, undefined)
   })
 
   it('resetLiveState drops live transcript and approvals but keeps identity', async () => {

@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { after, describe, it } from 'node:test'
 import { DeckClient } from '../src/protocol/client.ts'
 import { API_PATH, RESPOND_PATH } from '../src/protocol/contract.ts'
+import { isRecord, readJson } from './helpers/protocol.ts'
 
 interface Captured {
   method: string
@@ -10,23 +11,10 @@ interface Captured {
   body: unknown
 }
 
-async function readJson(req: IncomingMessage): Promise<unknown> {
-  const chunks: Buffer[] = []
-  for await (const chunk of req) {
-    chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk)
-  }
-  return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null
-}
-
 async function listen(
   handler: (req: IncomingMessage, res: ServerResponse, captured: Captured[]) => Promise<void> | void,
 ): Promise<{ url: string; captured: Captured[]; close: () => Promise<void> }> {
   const captured: Captured[] = []
-  const hanging: ServerResponse[] = []
   const server = createServer((req, res) => {
     void (async () => {
       try {
@@ -52,11 +40,9 @@ async function listen(
     url: `http://127.0.0.1:${address.port}`,
     captured,
     close: () => new Promise((resolveClose) => {
-      for (const res of hanging) res.destroy()
       server.closeAllConnections()
       server.close(() => resolveClose())
     }),
-    // expose hanging list via closure on handler by assigning to captured? keep local
   }
 }
 
@@ -67,11 +53,9 @@ function json(res: ServerResponse, status: number, body: unknown): void {
 
 describe('DeckClient.call', () => {
   it('mints rpcId, posts the envelope, verifies the echo, and returns the value', async () => {
-    const captured: Captured[] = []
-    const { url, close } = await listen(async (req, res, bag) => {
+    const { url, captured, close } = await listen(async (req, res, bag) => {
       const body = await readJson(req)
       bag.push({ method: req.method ?? '', url: req.url ?? '', body })
-      captured.push(bag[bag.length - 1] as Captured)
       assert.ok(isRecord(body))
       json(res, 200, {
         type: 'server-response',
@@ -219,10 +203,9 @@ describe('DeckClient.call', () => {
 
 describe('DeckClient.respond', () => {
   it('POSTs /api/respond echoing the server rpcId', async () => {
-    const captured: Captured[] = []
-    const { url, close } = await listen(async (req, res) => {
+    const { url, captured, close } = await listen(async (req, res, bag) => {
       const body = await readJson(req)
-      captured.push({ method: req.method ?? '', url: req.url ?? '', body })
+      bag.push({ method: req.method ?? '', url: req.url ?? '', body })
       json(res, 200, { accepted: true })
     })
     after(() => close())
@@ -258,9 +241,8 @@ describe('DeckClient.respond', () => {
   })
 
   it('can send a failed result for a cancelled question', async () => {
-    const captured: Captured[] = []
-    const { url, close } = await listen(async (req, res) => {
-      captured.push({ method: req.method ?? '', url: req.url ?? '', body: await readJson(req) })
+    const { url, captured, close } = await listen(async (req, res, bag) => {
+      bag.push({ method: req.method ?? '', url: req.url ?? '', body: await readJson(req) })
       json(res, 200, { accepted: true })
     })
     after(() => close())

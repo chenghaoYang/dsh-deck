@@ -21,7 +21,11 @@ export function linkableFilePath(value: string): boolean {
   if (value.includes('/') || value.includes('\\')) return true
   if (value.startsWith('./') || value.startsWith('../')) return true
   const base = value.split(/[/\\]/).pop() ?? ''
-  return base.includes('.')
+  if (!/[A-Za-z]/.test(base)) return false
+  const lastDot = base.lastIndexOf('.')
+  if (lastDot <= 0) return false
+  const ext = base.slice(lastDot + 1)
+  return ext.length > 0 && ext.length <= 8 && /^[A-Za-z0-9]+$/.test(ext)
 }
 
 export type PathRun = { text: string; href?: string }

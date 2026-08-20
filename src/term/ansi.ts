@@ -9,6 +9,7 @@
 
 export const CSI = '\u001b['
 export const OSC = '\u001b]'
+export const APC = '\u001b_'
 export const ST = '\u001b\\'
 export const RESET = `${CSI}0m`
 
@@ -23,16 +24,8 @@ export function sanitizeOscPayload(text: string): string {
   return text.replace(UNSAFE_OSC, '')
 }
 
-export function sgr(...codes: (number | string)[]): string {
+export function sgr(...codes: number[]): string {
   return `${CSI}${codes.join(';')}m`
-}
-
-export function fg256(n: number): string {
-  return sgr(38, 5, n & 0xff)
-}
-
-export function bg256(n: number): string {
-  return sgr(48, 5, n & 0xff)
 }
 
 export function rgb(r: number, g: number, b: number): string {
@@ -47,11 +40,6 @@ export function rgbBg(r: number, g: number, b: number): string {
 /** CUP — 1-based row/column. */
 export function cursorTo(row: number, col: number): string {
   return `${CSI}${Math.max(1, row | 0)};${Math.max(1, col | 0)}H`
-}
-
-/** EL 2 — entire line. */
-export function eraseLine(): string {
-  return `${CSI}2K`
 }
 
 /** ED 2 — entire display. */

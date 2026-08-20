@@ -110,8 +110,14 @@ export function createDashboard(
   }
   if (sorted.length === 0) return state
   if (focusedId !== undefined) {
-    const at = visibleIndexOf(state, focusedId)
-    if (at > 0) return { ...state, cursor: at }
+    let at = visibleIndexOf(state, focusedId)
+    if (at < 0 && !state.idleExpanded) {
+      const expanded: DashboardState = { ...state, idleExpanded: true }
+      at = visibleIndexOf(expanded, focusedId)
+      if (at > 0) return { ...expanded, cursor: at }
+    } else if (at > 0) {
+      return { ...state, cursor: at }
+    }
   }
   return { ...state, cursor: 1 }
 }

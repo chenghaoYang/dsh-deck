@@ -27,7 +27,12 @@ import type {
   TurnEndData,
   TurnStartData,
 } from '../protocol/contract.ts'
+import { asFiniteNumber, isRecord } from '../protocol/guards.ts'
 
+/**
+ * Reserved library surface: the UI derives its running indicator from
+ * `SessionState.running`; no runtime consumer reads `phase` yet.
+ */
 export type TurnPhase = 'idle' | 'thinking' | 'streaming' | 'tool' | 'done' | 'error'
 
 export interface ToolCallEntry {
@@ -105,6 +110,8 @@ export function applyEvent(
   event: SessionEvent,
   view?: ToolEventView,
 ): TranscriptState {
+  // Reserved: `view` is the host-computed render intent. The parameter rides
+  // the wire contract end-to-end but is intentionally unconsumed for now.
   void view
   try {
     return applyEventInner(state, event)
@@ -960,16 +967,8 @@ function toolResultIsError(data: Record<string, unknown>): boolean {
   return false
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return isRecord(value) ? value : undefined
-}
-
-function asFiniteNumber(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
 }
 
 function clearRetrying(state: TranscriptState): TranscriptState {

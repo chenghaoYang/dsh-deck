@@ -7,6 +7,7 @@
  */
 
 import {
+  APC,
   OSC,
   ST,
   hyperlink,
@@ -132,7 +133,7 @@ export class TerminalIntegration {
    */
   clearImages(): void {
     if (!this.#caps.kittyGraphics) return
-    this.#write('\u001b_Ga=d,d=A\u001b\\')
+    this.#write(`${APC}Ga=d,d=A${ST}`)
   }
 
   /**
@@ -182,9 +183,9 @@ function kittyChunk(
   chunk: string,
 ): string {
   const m = last ? 0 : 1
-  if (!first) return `\u001b_Gm=${m};${chunk}\u001b\\`
+  if (!first) return `${APC}Gm=${m};${chunk}${ST}`
   let ctrl = `a=T,f=100,m=${m}`
   if (opts?.columns !== undefined) ctrl += `,c=${opts.columns}`
   if (opts?.rows !== undefined) ctrl += `,r=${opts.rows}`
-  return `\u001b_G${ctrl};${chunk}\u001b\\`
+  return `${APC}G${ctrl};${chunk}${ST}`
 }

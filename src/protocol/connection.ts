@@ -8,6 +8,7 @@ import {
   type RpcId,
   type ServerRequest,
 } from './contract.ts'
+import { isRecord } from './guards.ts'
 
 export type ConnectionState = 'connecting' | 'ready' | 'reconnecting' | 'closed'
 
@@ -23,10 +24,6 @@ export interface ConnectionEvents {
 
 const BACKOFF_MIN_MS = 250
 const BACKOFF_MAX_MS = 8_000
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null
-}
 
 function isServerRequest(value: unknown): value is ServerRequest {
   return isRecord(value)
@@ -79,6 +76,8 @@ export class Connection {
   readonly #events: Partial<ConnectionEvents>
   #state: ConnectionState = 'closed'
   #generation = 0
+  /** Bumped on every start(); stale loops detect the restart and exit. */
+  #epoch = 0
   #running = false
   #reconnectAttempt = 0
   #generationAbort: AbortController | null = null
@@ -96,6 +95,9 @@ export class Connection {
   start(): void {
     if (this.#running) return
     this.#running = true
+    // A loop suspended in sleep/handshake from a previous close() must not
+    // resume into the restarted run; the epoch check makes it a no-op.
+    this.#epoch += 1
     this.#reconnectAttempt = 0
     this.#setState('connecting')
     void this.#loop()
@@ -157,7 +159,8 @@ export class Connection {
   }
 
   async #loop(): Promise<void> {
-    while (this.#running) {
+    const epoch = this.#epoch
+    while (this.#running && epoch === this.#epoch) {
       const gen = ++this.#generation
       const ac = new AbortController()
       this.#generationAbort = ac
@@ -172,7 +175,7 @@ export class Connection {
 
       try {
         const host = await this.#handshake(gen, ac)
-        if (!this.#running || ac.signal.aborted) {
+        if (!this.#running || epoch !== this.#epoch || ac.signal.aborted) {
           throw new Error(loseReason)
         }
         this.#reconnectAttempt = 0
@@ -180,27 +183,32 @@ export class Connection {
         this.#setState('ready')
         this.#safe(() => this.#events.ready?.(host, gen))
         await whenAborted(ac.signal)
-        if (!this.#running) return
+        if (!this.#running || epoch !== this.#epoch) return
         this.#safe(() => this.#events.lost?.(loseReason, gen))
       } catch (error) {
-        if (!ac.signal.aborted) ac.abort()
-        if (this.#announcedReady && this.#running) {
+        // Carry the real error so the abort listener keeps its message
+        // instead of a generic "operation aborted" reason.
+        if (!ac.signal.aborted) ac.abort(error)
+        if (this.#announcedReady && this.#running && epoch === this.#epoch) {
           const message = error instanceof Error ? error.message : String(error)
           this.#safe(() => this.#events.lost?.(message, gen))
         }
       } finally {
-        this.#teardownSockets()
-        this.#generationAbort = null
+        // A restarted run already owns fresh sockets; tearing them down or
+        // clobbering its abort controller here would leak the new generation.
+        if (epoch === this.#epoch) {
+          this.#teardownSockets()
+          this.#generationAbort = null
+        }
       }
 
-      if (!this.#running) return
+      if (!this.#running || epoch !== this.#epoch) return
       this.#setState('reconnecting', loseReason)
       this.#reconnectAttempt += 1
       const idle = new AbortController()
       this.#idleAbort = idle
-      if (!this.#running) return
       await sleep(this.#backoffDelay(), idle.signal)
-      this.#idleAbort = null
+      if (epoch === this.#epoch) this.#idleAbort = null
     }
   }
 

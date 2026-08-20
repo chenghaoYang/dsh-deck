@@ -24,6 +24,7 @@ import type {
   SessionId,
   SessionSummary,
 } from '../protocol/contract.ts'
+import { asFiniteNumber, isRecord } from '../protocol/guards.ts'
 
 export interface SessionState {
   id: SessionId
@@ -198,6 +199,8 @@ export class DeckStore {
         return
       case 'session/jobs':
       case 'stream/error':
+        // Job lists and stream errors ride the generation-loss path; the
+        // store has no per-frame state to keep for them.
         return
       default:
         return
@@ -212,6 +215,10 @@ export class DeckStore {
         return
       case 'host/session-removed': {
         this.byId.delete(frame.sessionId)
+        this.modelSelections.delete(frame.sessionId)
+        for (const key of this.projections.keys()) {
+          if (key.startsWith(`${frame.sessionId}\0`)) this.projections.delete(key)
+        }
         if (this.focusedId === frame.sessionId) delete this.focusedId
         this.emit({ kind: 'sessions' })
         return
@@ -240,6 +247,7 @@ export class DeckStore {
         this.replaceArchived(frame.archivedSessionIds)
         return
       default:
+        // Workspace/remote frames are contract mirrors deck does not render.
         return
     }
   }
@@ -279,9 +287,8 @@ export class DeckStore {
   applyHistoryPage(id: SessionId, entries: readonly HistoryEntry[], hasMore: boolean): void {
     const session = this.ensure(id)
     const merged = mergeHistory(session.transcript, entries)
-    const latest = this.byId.get(id) ?? session
     this.byId.set(id, {
-      ...latest,
+      ...session,
       transcript: merged,
       historyLoaded: true,
       hasMoreHistory: hasMore,
@@ -604,8 +611,9 @@ export class DeckStore {
         for (const event of batch) {
           try {
             listener(event)
-          } catch {
+          } catch (error) {
             // A subscriber failure must not drop the rest of the batch.
+            console.error('[deck] store subscriber threw:', error)
           }
         }
       }
@@ -654,7 +662,9 @@ function mergeHistory(
   }
 
   // Older page: fold independently and prepend. applyEvent would no-op
-  // because those seqs are below lastSeq.
+  // because those seqs are below lastSeq. This branch assumes host history
+  // pages never straddle the current earliest item (`beforeSeq` semantics);
+  // a straddling page would fall through and lose its older half.
   if (current.items.length > 0 && last.event.seq < minExisting) {
     const older = applyHistory(emptyTranscript(), entries)
     return {
@@ -727,12 +737,12 @@ function applyModeKey(current: SessionModes, key: string, value: unknown): Sessi
 }
 
 function parsePermissions(value: unknown): PermissionsProjection | undefined {
-  if (!isPlainRecord(value)) return undefined
+  if (!isRecord(value)) return undefined
   const { options, currentValue } = value
   if (typeof currentValue !== 'string' || !Array.isArray(options)) return undefined
   const parsed: { value: string; name: string }[] = []
   for (const option of options) {
-    if (!isPlainRecord(option)) return undefined
+    if (!isRecord(option)) return undefined
     if (typeof option.value !== 'string') return undefined
     parsed.push({ value: option.value, name: typeof option.name === 'string' ? option.name : option.value })
   }
@@ -740,7 +750,7 @@ function parsePermissions(value: unknown): PermissionsProjection | undefined {
 }
 
 function parsePlan(value: unknown): PlanProjection | undefined {
-  if (!isPlainRecord(value)) return undefined
+  if (!isRecord(value)) return undefined
   const { active, pending } = value
   if (typeof active !== 'boolean' || typeof pending !== 'boolean') return undefined
   return { active, pending }
@@ -785,14 +795,14 @@ function applyTelemetryKey(
 
 /** `false` = valid object without a window (clear); `undefined` = malformed. */
 function parseContextWindow(value: unknown): number | false | undefined {
-  if (!isPlainRecord(value)) return undefined
+  if (!isRecord(value)) return undefined
   if (!('contextWindow' in value)) return false
   const window = value.contextWindow
   return typeof window === 'number' && Number.isFinite(window) ? window : undefined
 }
 
 function parseBreakdown(value: unknown): SessionTelemetry['breakdown'] | undefined {
-  if (!isPlainRecord(value)) return undefined
+  if (!isRecord(value)) return undefined
   const systemTokens = asFiniteNumber(value.systemTokens)
   const toolsTokens = asFiniteNumber(value.toolsTokens)
   const messageTokens = asFiniteNumber(value.messageTokens)
@@ -803,7 +813,7 @@ function parseBreakdown(value: unknown): SessionTelemetry['breakdown'] | undefin
 }
 
 function parseStats(value: unknown): SessionTelemetry['stats'] | undefined {
-  if (!isPlainRecord(value)) return undefined
+  if (!isRecord(value)) return undefined
   const turns = asFiniteNumber(value.turns)
   const steps = asFiniteNumber(value.steps)
   const llmMs = asFiniteNumber(value.llmMs)
@@ -845,14 +855,6 @@ function sameStats(
     && a.ttftSteps === b.ttftSteps
     && a.decodeMs === b.decodeMs
     && a.decodeTokens === b.decodeTokens
-}
-
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-function asFiniteNumber(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
 }
 
 function sameIdSet(a: ReadonlySet<SessionId>, b: ReadonlySet<SessionId>): boolean {

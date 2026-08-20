@@ -12,6 +12,7 @@ import {
   type ResponseValue,
   type ServerResponse,
 } from './contract.ts'
+import { isRecord } from './guards.ts'
 
 export interface DeckClientOptions {
   /** e.g. "http://127.0.0.1:3080" */
@@ -21,10 +22,6 @@ export interface DeckClientOptions {
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null
-}
 
 /** Fold a thrown carrier failure the same way upstream `transportError` does. */
 function transportError<T>(error: unknown): RpcResult<T> {
@@ -121,11 +118,8 @@ export class DeckClient {
           `rpcId mismatch for ${method}: sent ${rpcId}, got ${envelope.rpcId}`,
         )
       }
-      const result = asRpcResult<ResponseValue<K>>(envelope.result)
-      if (result === undefined) {
-        return transportError(`transport failure for ${API_PATH}/${method}: malformed result slot`)
-      }
-      return result
+      // asServerResponse already validated the result slot shape.
+      return envelope.result as RpcResult<ResponseValue<K>>
     } catch (error) {
       return transportError(error)
     }

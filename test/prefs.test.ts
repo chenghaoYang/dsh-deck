@@ -46,6 +46,19 @@ describe('prefs', () => {
     assert.deepEqual(loadPrefs(env), {})
   })
 
+  it('merges dashboard updates without dropping the rest of the file', () => {
+    const { env } = tempEnv()
+    assert.equal(savePrefs({
+      dashboard: { grouping: 'state', pinned: ['keep'], pinOrder: ['keep'] },
+    }, env), true)
+    assert.equal(savePrefs({
+      dashboard: { grouping: 'directory', pinned: ['keep'], pinOrder: ['keep'] },
+    }, env), true)
+    assert.deepEqual(loadPrefs(env), {
+      dashboard: { grouping: 'directory', pinned: ['keep'], pinOrder: ['keep'] },
+    })
+  })
+
   it('creates a missing directory on save', () => {
     const { dir, env } = tempEnv()
     const nested = join(dir, 'nested', 'home')

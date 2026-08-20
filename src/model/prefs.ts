@@ -29,7 +29,9 @@ export function savePrefs(prefs: DeckPrefs, env?: NodeJS.ProcessEnv): boolean {
   const path = prefsPath(env)
   try {
     mkdirSync(dirname(path), { recursive: true })
-    writeFileSync(path, `${JSON.stringify(prefs, null, 2)}\n`, 'utf8')
+    const merged: DeckPrefs = { ...loadPrefs(env) }
+    if (prefs.dashboard !== undefined) merged.dashboard = prefs.dashboard
+    writeFileSync(path, `${JSON.stringify(merged, null, 2)}\n`, 'utf8')
     return true
   } catch {
     return false

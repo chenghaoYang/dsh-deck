@@ -11,6 +11,17 @@
 
 import { StringDecoder } from 'node:string_decoder'
 
+type NavKind =
+  | 'up'
+  | 'down'
+  | 'left'
+  | 'right'
+  | 'home'
+  | 'end'
+  | 'pageup'
+  | 'pagedown'
+  | 'delete'
+
 export type Key =
   | { kind: 'char'; char: string }
   | {
@@ -20,15 +31,7 @@ export type Key =
         | 'word-backspace'
         | 'tab'
         | 'escape'
-        | 'up'
-        | 'down'
-        | 'left'
-        | 'right'
-        | 'home'
-        | 'end'
-        | 'pageup'
-        | 'pagedown'
-        | 'delete'
+        | NavKind
     }
   | { kind: 'ctrl'; char: string }
   | { kind: 'alt'; char: string }
@@ -60,17 +63,6 @@ const ESC = '\u001b'
 const PASTE_START = `${ESC}[200~`
 const PASTE_END = `${ESC}[201~`
 const ESC_TIMEOUT_MS = 25
-
-type NavKind =
-  | 'up'
-  | 'down'
-  | 'left'
-  | 'right'
-  | 'home'
-  | 'end'
-  | 'pageup'
-  | 'pagedown'
-  | 'delete'
 
 const CSI_NAV: Record<string, NavKind> = {
   A: 'up',
@@ -112,6 +104,7 @@ export class InputReader {
       this.#wasRaw = this.#input.isRaw
       this.#input.setRawMode(true)
     }
+    process.on('exit', this.#restoreOnExit)
     this.#input.setEncoding('utf8')
     this.#input.on('data', this.#onData)
     this.#input.resume?.()
@@ -120,6 +113,7 @@ export class InputReader {
   stop(): void {
     if (!this.#started) return
     this.#started = false
+    process.removeListener('exit', this.#restoreOnExit)
     this.#clearEscTimer()
     this.#input.removeListener('data', this.#onData)
     const rest = this.#decoder.end()
@@ -163,6 +157,24 @@ export class InputReader {
     }
   }
 
+  /**
+   * Synchronous-only 'exit' hook (crash / SIGINT paths never reach stop()):
+   * restore termios so the terminal is not left raw without echo.
+   */
+  #restoreOnExit = (): void => {
+    if (
+      this.#wasRaw !== undefined &&
+      this.#input.isTTY &&
+      typeof this.#input.setRawMode === 'function'
+    ) {
+      try {
+        this.#input.setRawMode(this.#wasRaw)
+      } catch {
+        // stream may already be closed
+      }
+    }
+  }
+
   #onData = (chunk: string | Buffer): void => {
     this.#clearEscTimer()
     if (typeof chunk === 'string') this.#buf += chunk
@@ -187,7 +199,7 @@ export class InputReader {
   }
 
   #emitEnter(modifier = 1): void {
-    const bits = Number.isFinite(modifier) ? Math.max(0, modifier - 1) : 0
+    const bits = modBits(modifier)
     if (bits === 0) {
       this.#emit({ kind: 'enter' })
       return
@@ -202,7 +214,7 @@ export class InputReader {
   }
 
   #emitBackspace(modifier = 1): void {
-    const bits = Number.isFinite(modifier) ? Math.max(0, modifier - 1) : 0
+    const bits = modBits(modifier)
     this.#emit({ kind: (bits & 2) !== 0 ? 'word-backspace' : 'backspace' })
   }
 
@@ -234,7 +246,6 @@ export class InputReader {
       }
 
       const first = this.#buf.charCodeAt(0)
-      if (first === undefined) return
 
       if (first === 0x1b) {
         if (this.#buf.startsWith(PASTE_START)) {
@@ -256,7 +267,17 @@ export class InputReader {
           this.#dispatchCsi(csi.params, csi.final, csi.raw)
           continue
         }
-        if (this.#buf.length >= 3 && this.#buf[1] === 'O') {
+        if (this.#buf[1] === 'O') {
+          if (this.#buf.length < 3) {
+            // SS3 (ESC O x) split across chunks: hold like incomplete CSI so
+            // the final byte cannot be misread as an alt-key combo.
+            if (flush) {
+              this.#emit({ kind: 'escape' })
+              this.#buf = this.#buf.slice(1)
+              continue
+            }
+            return
+          }
           const ss3 = this.#buf[2] ?? ''
           const kind = CSI_NAV[ss3]
           this.#buf = this.#buf.slice(3)
@@ -329,7 +350,6 @@ export class InputReader {
     let i = 2
     while (i < this.#buf.length) {
       const c = this.#buf.charCodeAt(i)
-      if (c === undefined) break
       if (c >= 0x30 && c <= 0x3f) {
         i++
         continue
@@ -368,10 +388,6 @@ export class InputReader {
     if (final === '~') {
       const parts = params.split(';')
       const n = (parts[0] ?? '') || '1'
-      if (n === '200') {
-        this.#paste = ''
-        return
-      }
       // xterm modifyOtherKeys: CSI 27 ; modifier ; codepoint ~
       if (n === '27' && Number(parts[2]) === 13) {
         this.#emitEnter(Number(parts[1] ?? 1))
@@ -429,7 +445,7 @@ export class InputReader {
   #dispatchCsiUPrintable(code: number, modifier: number): boolean {
     if (!Number.isInteger(code) || code < 32 || code > 0x10ffff) return false
     if (code >= 0xd800 && code <= 0xdfff) return false
-    const bits = Number.isFinite(modifier) ? Math.max(0, modifier - 1) : 0
+    const bits = modBits(modifier)
     const ctrl = (bits & 4) !== 0
     const alt = (bits & 2) !== 0
     if (ctrl && code === 47) {
@@ -525,4 +541,9 @@ function firstGrapheme(text: string): string | undefined {
   if (text.length === 0) return undefined
   for (const part of SEGMENTER.segment(text)) return part.segment
   return undefined
+}
+
+/** xterm modifier field starts at 1; bit 0 is shift. */
+function modBits(modifier: number): number {
+  return Number.isFinite(modifier) ? Math.max(0, modifier - 1) : 0
 }
