@@ -142,6 +142,41 @@ export function graphemes(text: string): string[] {
   return out
 }
 
+/**
+ * Grapheme boundaries expressed as code-point offsets — the cursor convention
+ * of the composer renderers. Movement is grapheme based even though indices
+ * count code points.
+ */
+export function previousGraphemeBoundary(text: string, cursor: number): number {
+  let offset = 0
+  for (const cluster of graphemes(text)) {
+    const next = offset + [...cluster].length
+    if (cursor <= next) return offset
+    offset = next
+  }
+  return offset
+}
+
+export function graphemeBoundaryAtOrBefore(text: string, cursor: number): number {
+  let offset = 0
+  for (const cluster of graphemes(text)) {
+    const next = offset + [...cluster].length
+    if (cursor < next) return offset
+    offset = next
+  }
+  return offset
+}
+
+export function nextGraphemeBoundary(text: string, cursor: number): number {
+  let offset = 0
+  for (const cluster of graphemes(text)) {
+    const next = offset + [...cluster].length
+    if (cursor < next) return next
+    offset = next
+  }
+  return offset
+}
+
 /** Display columns for one grapheme cluster: 0, 1, or 2. */
 export function graphemeWidth(cluster: string): 0 | 1 | 2 {
   if (cluster.length === 0) return 0

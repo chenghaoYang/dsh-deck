@@ -68,4 +68,19 @@ describe('prefs', () => {
     assert.deepEqual(loadPrefs(nestedEnv), prefs)
     assert.equal(env.DECK_HOME, dir)
   })
+
+  it('roundtrips lastHarness without dropping dashboard prefs', () => {
+    const { env } = tempEnv()
+    assert.equal(savePrefs({
+      dashboard: { grouping: 'state', pinned: ['keep'] },
+    }, env), true)
+    assert.equal(savePrefs({ lastHarness: 'codex' }, env), true)
+    assert.deepEqual(loadPrefs(env), {
+      dashboard: { grouping: 'state', pinned: ['keep'] },
+      lastHarness: 'codex',
+    })
+    assert.equal(savePrefs({ lastHarness: 'dsh' }, env), true)
+    assert.equal(loadPrefs(env).lastHarness, 'dsh')
+    assert.deepEqual(loadPrefs(env).dashboard, { grouping: 'state', pinned: ['keep'] })
+  })
 })

@@ -7,12 +7,16 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 
+import { isSessionHarness, type SessionHarness } from '../harness/catalog.ts'
+
 export interface DeckPrefs {
   dashboard?: {
     grouping?: 'state' | 'directory'
     pinned?: string[]
     pinOrder?: string[]
   }
+  /** Last harness chosen in modes; `dsh` means native Host API. */
+  lastHarness?: SessionHarness
 }
 
 export function loadPrefs(env?: NodeJS.ProcessEnv): DeckPrefs {
@@ -31,6 +35,7 @@ export function savePrefs(prefs: DeckPrefs, env?: NodeJS.ProcessEnv): boolean {
     mkdirSync(dirname(path), { recursive: true })
     const merged: DeckPrefs = { ...loadPrefs(env) }
     if (prefs.dashboard !== undefined) merged.dashboard = prefs.dashboard
+    if (prefs.lastHarness !== undefined) merged.lastHarness = prefs.lastHarness
     writeFileSync(path, `${JSON.stringify(merged, null, 2)}\n`, 'utf8')
     return true
   } catch {
@@ -48,19 +53,25 @@ function prefsPath(env?: NodeJS.ProcessEnv): string {
 function parsePrefs(raw: unknown): DeckPrefs {
   const obj = asRecord(raw)
   if (obj === undefined) return {}
-  if (!('dashboard' in obj)) return {}
-  const dash = asRecord(obj.dashboard)
-  if (dash === undefined) return {}
+  const prefs: DeckPrefs = {}
 
-  const dashboard: NonNullable<DeckPrefs['dashboard']> = {}
-  if (dash.grouping === 'state' || dash.grouping === 'directory') {
-    dashboard.grouping = dash.grouping
+  const dash = asRecord(obj.dashboard)
+  if (dash !== undefined) {
+    const dashboard: NonNullable<DeckPrefs['dashboard']> = {}
+    if (dash.grouping === 'state' || dash.grouping === 'directory') {
+      dashboard.grouping = dash.grouping
+    }
+    const pinned = asStringArray(dash.pinned)
+    if (pinned !== undefined) dashboard.pinned = pinned
+    const pinOrder = asStringArray(dash.pinOrder)
+    if (pinOrder !== undefined) dashboard.pinOrder = pinOrder
+    if (Object.keys(dashboard).length > 0) prefs.dashboard = dashboard
   }
-  const pinned = asStringArray(dash.pinned)
-  if (pinned !== undefined) dashboard.pinned = pinned
-  const pinOrder = asStringArray(dash.pinOrder)
-  if (pinOrder !== undefined) dashboard.pinOrder = pinOrder
-  return { dashboard }
+
+  if (typeof obj.lastHarness === 'string' && isSessionHarness(obj.lastHarness)) {
+    prefs.lastHarness = obj.lastHarness
+  }
+  return prefs
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {

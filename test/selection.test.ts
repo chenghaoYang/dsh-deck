@@ -17,25 +17,7 @@ import {
 import { renderTranscript } from '../src/ui/transcript.ts'
 import type { Theme } from '../src/ui/theme.ts'
 import { graphemes, stringWidth } from '../src/term/width.ts'
-
-const theme: Theme = {
-  base: 'BASE',
-  dim: 'DIM',
-  subtle: 'SUBTLE',
-  text: 'TEXT',
-  accent: 'ACCENT',
-  user: 'USER',
-  assistant: 'ASSISTANT',
-  reasoning: 'REASONING',
-  tool: 'TOOL',
-  ok: 'OK',
-  warn: 'WARN',
-  error: 'ERROR',
-  running: 'RUNNING',
-  selected: 'SELECTED',
-  border: 'BORDER',
-  reset: 'RESET',
-}
+import { testTheme as theme } from './helpers/ui.ts'
 
 const rect: Rect = { row: 3, col: 5, width: 40, height: 10 }
 

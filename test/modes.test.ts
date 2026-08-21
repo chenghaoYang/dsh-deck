@@ -18,42 +18,7 @@ import {
   type ModesResult,
   type ModesState,
 } from '../src/ui/modes.ts'
-
-const theme: Theme = {
-  base: 'BASE',
-  dim: 'DIM',
-  subtle: 'SUBTLE',
-  text: 'TEXT',
-  accent: 'ACCENT',
-  user: 'USER',
-  assistant: 'ASSISTANT',
-  reasoning: 'REASONING',
-  tool: 'TOOL',
-  ok: 'OK',
-  warn: 'WARN',
-  error: 'ERROR',
-  running: 'RUNNING',
-  selected: 'SELECTED',
-  border: 'BORDER',
-  reset: 'RESET',
-}
-
-const glyphs: Glyphs = {
-  running: ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'],
-  idle: '○',
-  error: '✖',
-  user: '▸',
-  assistant: '◆',
-  reasoning: '·',
-  tool: '⚙',
-  approve: '⚠',
-  hline: '─',
-  vline: '│',
-  corner: { tl: '╭', tr: '╮', bl: '╰', br: '╯' },
-  tee: { left: '├', right: '┤', down: '┬', up: '┴' },
-  bar: '▎',
-  arrow: '›',
-}
+import { testTheme as theme, testGlyphs as glyphs } from './helpers/ui.ts'
 
 class BoundsTarget implements RenderTarget {
   readonly puts: { row: number; col: number; text: string; style: string }[] = []
@@ -437,6 +402,41 @@ describe('modes render bounds', () => {
     for (const put of target.puts) {
       assert.ok(put.row >= panel.row && put.row < panel.row + panel.height)
       assert.ok(put.col >= panel.col && put.col < panel.col + panel.width)
+    }
+  })
+
+  it('harness is a switchable row like model/preset', () => {
+    const rows: ModeRow[] = [
+      row('model', { value: 'host default' }),
+      row('harness', {
+        value: 'dsh',
+        optionsTitle: 'harness',
+        options: [
+          opt('dsh', { label: 'dsh', current: true }),
+          opt('codex', { label: 'codex' }),
+          opt('pi', { label: 'pi', disabled: 'not on PATH' }),
+        ],
+      }),
+    ]
+    const start = createModes(rows)
+    const onHarness = mustContinue(reduceModes(start, { kind: 'down' }))
+    assert.equal(onHarness.rows[onHarness.cursor]?.id, 'harness')
+    const drilled = mustContinue(reduceModes(onHarness, { kind: 'enter' }))
+    assert.equal(drilled.level, 'options')
+    const picked = reduceModes(mustContinue(reduceModes(drilled, { kind: 'down' })), { kind: 'enter' })
+    assert.equal(picked.kind, 'chose')
+    if (picked.kind !== 'chose') return
+    assert.equal(picked.row, 'harness')
+    assert.equal(picked.value, 'codex')
+
+    const rect: Rect = { row: 2, col: 4, width: 40, height: 16 }
+    const target = new BoundsTarget(rect)
+    renderModes(target, rect, onHarness, theme, glyphs)
+    const painted = target.puts.map((put) => put.text).join('')
+    assert.ok(painted.includes('harness'))
+    for (const put of target.puts) {
+      assert.ok(put.row >= rect.row && put.row < rect.row + rect.height)
+      assert.ok(put.col >= rect.col && put.col < rect.col + rect.width)
     }
   })
 

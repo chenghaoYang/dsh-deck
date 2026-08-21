@@ -15,42 +15,7 @@ import {
   type SwitcherResult,
   type SwitcherState,
 } from '../src/ui/switcher.ts'
-
-const theme: Theme = {
-  base: 'BASE',
-  dim: 'DIM',
-  subtle: 'SUBTLE',
-  text: 'TEXT',
-  accent: 'ACCENT',
-  user: 'USER',
-  assistant: 'ASSISTANT',
-  reasoning: 'REASONING',
-  tool: 'TOOL',
-  ok: 'OK',
-  warn: 'WARN',
-  error: 'ERROR',
-  running: 'RUNNING',
-  selected: 'SELECTED',
-  border: 'BORDER',
-  reset: 'RESET',
-}
-
-const glyphs: Glyphs = {
-  running: ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'],
-  idle: '○',
-  error: '✖',
-  user: '▸',
-  assistant: '◆',
-  reasoning: '·',
-  tool: '⚙',
-  approve: '⚠',
-  hline: '─',
-  vline: '│',
-  corner: { tl: '╭', tr: '╮', bl: '╰', br: '╯' },
-  tee: { left: '├', right: '┤', down: '┬', up: '┴' },
-  bar: '▎',
-  arrow: '›',
-}
+import { testTheme as theme, testGlyphs as glyphs } from './helpers/ui.ts'
 
 class BoundsTarget implements RenderTarget {
   readonly puts: { row: number; col: number; text: string; style: string }[] = []
@@ -100,6 +65,7 @@ function entry(id: string, extra: {
   unread?: number
   blocked?: boolean
   updatedAt?: number
+  harness?: string
 } = {}): SwitcherEntry {
   const row: SwitcherEntry = {
     id,
@@ -110,6 +76,7 @@ function entry(id: string, extra: {
     updatedAt: extra.updatedAt ?? 0,
   }
   if (extra.cwd !== undefined) row.cwd = extra.cwd
+  if (extra.harness !== undefined) row.harness = extra.harness
   return row
 }
 
@@ -263,6 +230,21 @@ describe('reduceSwitcher', () => {
   it('ctrl+n creates a session from the list', () => {
     const start = createSwitcher(catalog)
     assert.equal(reduceSwitcher(start, { kind: 'ctrl', char: 'n' }).kind, 'create')
+  })
+
+  it('filter matches a harness id so mixed crews are searchable', () => {
+    const start = createSwitcher([
+      entry('a', { title: 'review', harness: 'codex' }),
+      entry('b', { title: 'review', harness: 'hermes' }),
+    ])
+    const filtered = mustContinue(feed(start, [
+      { kind: 'char', char: 'c' },
+      { kind: 'char', char: 'o' },
+      { kind: 'char', char: 'd' },
+    ]))
+    const focused = reduceSwitcher(filtered, { kind: 'enter' })
+    assert.equal(focused.kind, 'focus')
+    if (focused.kind === 'focus') assert.equal(focused.id, 'a')
   })
 })
 

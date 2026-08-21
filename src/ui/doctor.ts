@@ -7,6 +7,7 @@
 
 import type { TerminalCapabilities } from '../term/capabilities.ts'
 import type { HostDescription } from '../protocol/contract.ts'
+import { discoverHarnesses } from '../harness/discover.ts'
 
 export type DoctorStatus = 'ok' | 'warn' | 'off'
 
@@ -84,6 +85,7 @@ export function doctorFindings(input: DoctorInput): DoctorFinding[] {
     hostFinding(input.host),
     { name: 'cwd', status: 'ok', detail: input.cwd },
     editorUriFinding(env),
+    ...harnessFindings(env),
   ]
 
   const ascii = envValue(env, 'DECK_ASCII')
@@ -426,6 +428,27 @@ function hostDetail(host: HostDescription): string {
   else if (providerOk) parts.push(provider)
   else if (modelOk) parts.push(model)
   return parts.join(' · ')
+}
+
+function harnessFindings(env: NodeJS.ProcessEnv): DoctorFinding[] {
+  return discoverHarnesses({ env }).map((row) => {
+    if (row.present && row.binary !== undefined) {
+      const alias =
+        row.resolvedName !== undefined && row.resolvedName !== row.id
+          ? ` (${row.resolvedName})`
+          : ''
+      return {
+        name: `harness ${row.id}`,
+        status: 'ok' as const,
+        detail: `${row.binary}${alias}`,
+      }
+    }
+    return {
+      name: `harness ${row.id}`,
+      status: 'off' as const,
+      detail: 'not on PATH',
+    }
+  })
 }
 
 function editorUriFinding(env: NodeJS.ProcessEnv): DoctorFinding {

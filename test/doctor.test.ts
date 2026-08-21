@@ -99,6 +99,11 @@ describe('doctor', () => {
     assert.ok(!namesOf(findings).includes('caps override'))
     assert.ok(!namesOf(findings).includes('vim'))
     assert.deepEqual(namesOf(findings).slice(0, REQUIRED_NAMES.length), [...REQUIRED_NAMES])
+    for (const id of ['hermes', 'codex', 'claudecode', 'pi', 'fx', 'kimicode']) {
+      const finding = byName(findings, `harness ${id}`)
+      assert.equal(finding.status, 'off')
+      assert.match(finding.detail, /not on PATH/)
+    }
   })
 
   it('NO_COLOR → truecolor off', () => {
@@ -244,6 +249,20 @@ describe('doctor', () => {
     })
     const findings = doctorFindings(rest)
     assert.equal(byName(findings, 'clipboard').status, 'warn')
+  })
+
+  it('reports present PATH harnesses without installing them', () => {
+    const findings = doctorFindings(baseInput({
+      env: {
+        TERM: 'xterm-ghostty',
+        TERM_PROGRAM: 'ghostty',
+        PATH: '/opt/fake-bin',
+      },
+    }))
+    // PATH is fake and empty of binaries — listing must still name all six.
+    for (const id of ['hermes', 'codex', 'claudecode', 'pi', 'fx', 'kimicode']) {
+      assert.ok(namesOf(findings).includes(`harness ${id}`), `missing harness ${id}`)
+    }
   })
 })
 

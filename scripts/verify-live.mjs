@@ -246,6 +246,15 @@ async function main() {
     env: { ...process.env, TERM: 'xterm-256color' },
     stdio: ['pipe', 'pipe', 'pipe'],
   })
+  // A spawn failure (e.g. python3 missing) fires 'error' instead of rejecting
+  // the surrounding promise; without a handler the crash message is opaque.
+  child.on('error', (error) => {
+    console.error(`verify-live: pty bridge failed to start: ${error.message}`)
+    if (error.code === 'ENOENT') {
+      console.error('verify-live: python3 is required to run the live verification harness')
+    }
+    process.exit(1)
+  })
 
   let raw = ''
   child.stdout.setEncoding('utf8')

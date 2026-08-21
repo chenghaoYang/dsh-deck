@@ -23,3 +23,15 @@ export { InputReader, type Key } from './term/input.ts'
 export { graphemeWidth, stringWidth, stripAnsi, truncate, wrap } from './term/width.ts'
 
 export { DeckApp, type DeckAppOptions } from './ui/app.ts'
+
+export {
+  HARNESS_IDS,
+  buildHarnessOverlay,
+  discoverHarnesses,
+  formatHarnessList,
+  harnessAssistantText,
+  type HarnessDiscovery,
+  type HarnessId,
+  type OverlayPlan,
+  type SessionHarness,
+} from './harness.ts'

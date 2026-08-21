@@ -26,7 +26,7 @@ const ROWS_FOOTER = '↑↓ move · ⏎ change · esc close'
 const OPTIONS_FOOTER = '↑↓ move · ⏎ select · esc back'
 
 /** Which dsh mode a row switches. */
-export type ModeRowId = 'model' | 'agent' | 'permission' | 'plan'
+export type ModeRowId = 'model' | 'harness' | 'agent' | 'permission' | 'plan'
 
 export interface ModeOption {
   value: string

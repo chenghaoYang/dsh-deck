@@ -1,0 +1,7 @@
+{
+  // Publish build: src only. The base config also type-checks test/, but the
+  // test harness must not be compiled into lib/ (it never ships, and stale
+  // lib/test output muddies "what does the installed package contain").
+  "extends": "./tsconfig.json",
+  "include": ["src"]
+}

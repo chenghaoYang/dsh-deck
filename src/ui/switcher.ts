@@ -35,6 +35,8 @@ export interface SwitcherEntry {
   unread: number
   blocked: boolean
   updatedAt: number
+  /** PATH harness id when this session is not native dsh. */
+  harness?: string
 }
 
 export interface SwitcherState {
@@ -228,7 +230,8 @@ function highlighted(state: SwitcherState): SwitcherEntry | undefined {
 
 function entryHaystack(entry: SwitcherEntry): string {
   const base = cwdBasename(entry.cwd)
-  return base.length > 0 ? `${entry.title} ${base}` : entry.title
+  const harness = entry.harness ?? ''
+  return `${entry.title} ${base} ${harness}`.trim()
 }
 
 function cwdBasename(cwd: string | undefined): string {
@@ -275,7 +278,10 @@ function rowSpans(
   if (innerW <= 0) return []
 
   const renaming = state.stage === 'rename' && entry.id === state.renameId
-  const title = renaming ? state.renameDraft : entry.title
+  const harnessTag = !renaming && entry.harness !== undefined && entry.harness.length > 0
+    ? `${entry.harness} · `
+    : ''
+  const title = renaming ? state.renameDraft : `${harnessTag}${entry.title}`
   const { glyph, style: glyphStyle } = statusGlyph(entry, glyphs, theme, spinnerFrame)
   const mark = selected ? `${glyphs.arrow} ` : '  '
   const badge = unreadBadge(entry.unread)

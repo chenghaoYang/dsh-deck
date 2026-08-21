@@ -25,6 +25,7 @@ import type {
   SessionSummary,
 } from '../protocol/contract.ts'
 import { asFiniteNumber, isRecord } from '../protocol/guards.ts'
+import type { HarnessId } from '../harness/catalog.ts'
 
 export interface SessionState {
   id: SessionId
@@ -51,6 +52,11 @@ export interface SessionState {
   lastError?: string
   telemetry: SessionTelemetry
   modes: SessionModes
+  /**
+   * PATH harness this session is running through. Omit for native dsh (Host API).
+   * Survives host list/status frames; Deck is the source of truth.
+   */
+  harness?: HarnessId
 }
 
 /**
@@ -328,6 +334,7 @@ export class DeckStore {
       if (session.cwd !== undefined) next.cwd = session.cwd
       if (session.origin !== undefined) next.origin = session.origin
       if (session.parentSessionId !== undefined) next.parentSessionId = session.parentSessionId
+      if (session.harness !== undefined) next.harness = session.harness
       this.byId.set(id, next)
       this.emit({ kind: 'transcript', sessionId: id })
       this.emit({ kind: 'status', sessionId: id })
@@ -491,6 +498,79 @@ export class DeckStore {
    * it, so this is the only way the header can stop showing the host-wide
    * default after a per-session switch.
    */
+  setHarness(id: SessionId, harness: HarnessId | undefined): void {
+    const session = this.ensure(id)
+    if (harness === undefined) {
+      if (session.harness === undefined) return
+      const { harness: _dropped, ...rest } = session
+      void _dropped
+      this.byId.set(id, rest)
+      this.emit({ kind: 'sessions' })
+      this.emit({ kind: 'status', sessionId: id })
+      return
+    }
+    if (session.harness === harness) return
+    this.byId.set(id, { ...session, harness })
+    this.emit({ kind: 'sessions' })
+    this.emit({ kind: 'status', sessionId: id })
+  }
+
+  setRunning(id: SessionId, running: boolean): void {
+    const session = this.ensure(id)
+    const blank = running ? false : session.blank
+    if (session.running === running && session.blank === blank) return
+    this.byId.set(id, { ...session, running, blank })
+    this.emit({ kind: 'status', sessionId: id })
+    this.emit({ kind: 'sessions' })
+  }
+
+  appendHarnessTurn(
+    id: SessionId,
+    turn: { user: string; assistant?: string; error?: string; time?: number },
+  ): void {
+    const session = this.ensure(id)
+    const time = turn.time ?? Date.now()
+    let seq = session.transcript.lastSeq
+    const items = session.transcript.items.slice()
+    seq += 1
+    items.push({ kind: 'user', seq, time, text: turn.user })
+    if (turn.error !== undefined && turn.error.length > 0) {
+      seq += 1
+      items.push({ kind: 'error', seq, text: turn.error })
+    } else if (turn.assistant !== undefined) {
+      seq += 1
+      items.push({
+        kind: 'assistant',
+        seq,
+        turn: 0,
+        step: 0,
+        text: turn.assistant,
+        streaming: false,
+      })
+    }
+    const next: SessionState = {
+      ...session,
+      transcript: { ...session.transcript, items, lastSeq: seq, phase: 'idle' },
+      running: false,
+      blank: false,
+      updatedAt: time,
+    }
+    if (turn.error !== undefined && turn.error.length > 0) next.lastError = turn.error
+    else {
+      const { lastError: _clear, ...without } = next
+      void _clear
+      this.byId.set(id, without)
+      this.emit({ kind: 'transcript', sessionId: id })
+      this.emit({ kind: 'status', sessionId: id })
+      this.emit({ kind: 'sessions' })
+      return
+    }
+    this.byId.set(id, next)
+    this.emit({ kind: 'transcript', sessionId: id })
+    this.emit({ kind: 'status', sessionId: id })
+    this.emit({ kind: 'sessions' })
+  }
+
   applyModelSelection(id: SessionId, selection: { provider: string; model: string; effort?: string }): void {
     const prev = this.modelSelections.get(id)
     if (
@@ -713,6 +793,7 @@ function copyOptional(
   else if (prev?.parentSessionId !== undefined) next.parentSessionId = prev.parentSessionId
   if (src.title !== undefined) next.title = src.title
   else if (prev?.title !== undefined) next.title = prev.title
+  if (prev?.harness !== undefined) next.harness = prev.harness
   if (prev?.pendingApproval !== undefined) next.pendingApproval = prev.pendingApproval
   if (prev?.pendingQuestion !== undefined) next.pendingQuestion = prev.pendingQuestion
   if (prev?.lastError !== undefined) next.lastError = prev.lastError

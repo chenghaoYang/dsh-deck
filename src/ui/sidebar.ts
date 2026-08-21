@@ -5,6 +5,7 @@
 
 import { stringWidth, truncate } from '../term/width.ts'
 import { pendingApprovalsOf, pendingQuestionsOf, type SessionState } from '../model/store.ts'
+import { harnessLabel } from '../harness/catalog.ts'
 import type { Theme, Glyphs } from './theme.ts'
 import type { Rect } from './layout.ts'
 import {
@@ -166,13 +167,23 @@ function statusGlyph(
 
 function sessionLabel(session: SessionState): { text: string; untitled: boolean } {
   const title = session.title
-  if (title !== undefined && title.trim().length > 0) return { text: title.trim(), untitled: false }
-  const cwd = session.cwd
-  if (cwd !== undefined && cwd.length > 0) {
-    const base = cwd.replace(/[\\/]+$/, '').split(/[\\/]/).pop()
-    if (base !== undefined && base.length > 0) return { text: base, untitled: false }
+  let text: string
+  let untitled = false
+  if (title !== undefined && title.trim().length > 0) {
+    text = title.trim()
+  } else {
+    const cwd = session.cwd
+    const base = cwd !== undefined && cwd.length > 0
+      ? cwd.replace(/[\\/]+$/, '').split(/[\\/]/).pop()
+      : undefined
+    if (base !== undefined && base.length > 0) text = base
+    else {
+      text = 'untitled'
+      untitled = true
+    }
   }
-  return { text: 'untitled', untitled: true }
+  if (session.harness !== undefined) text = `${harnessLabel(session.harness)} · ${text}`
+  return { text, untitled }
 }
 
 function waitingBadgeText(count: number): string {

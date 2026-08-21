@@ -5,8 +5,12 @@
  */
 
 import type { Key } from '../term/input.ts'
-
-const SEGMENTER = new Intl.Segmenter('en', { granularity: 'grapheme' })
+import {
+  graphemeBoundaryAtOrBefore,
+  nextGraphemeBoundary,
+  previousGraphemeBoundary,
+} from '../term/width.ts'
+import { codePointLength, codePointSlice } from './render.ts'
 
 export type VimInsertMode = 'insert' | 'normal'
 
@@ -328,48 +332,4 @@ function graphemeAt(text: string, cursor: number): string {
   if (cur >= codePointLength(text)) return ''
   const start = graphemeBoundaryAtOrBefore(text, cur)
   return codePointSlice(text, start, nextGraphemeBoundary(text, start))
-}
-
-function graphemesOf(text: string): string[] {
-  const out: string[] = []
-  for (const part of SEGMENTER.segment(text)) out.push(part.segment)
-  return out
-}
-
-function codePointLength(text: string): number {
-  return [...text].length
-}
-
-function codePointSlice(text: string, start: number, end?: number): string {
-  return [...text].slice(start, end).join('')
-}
-
-function previousGraphemeBoundary(text: string, cursor: number): number {
-  let offset = 0
-  for (const cluster of graphemesOf(text)) {
-    const next = offset + codePointLength(cluster)
-    if (cursor <= next) return offset
-    offset = next
-  }
-  return offset
-}
-
-function graphemeBoundaryAtOrBefore(text: string, cursor: number): number {
-  let offset = 0
-  for (const cluster of graphemesOf(text)) {
-    const next = offset + codePointLength(cluster)
-    if (cursor < next) return offset
-    offset = next
-  }
-  return offset
-}
-
-function nextGraphemeBoundary(text: string, cursor: number): number {
-  let offset = 0
-  for (const cluster of graphemesOf(text)) {
-    const next = offset + codePointLength(cluster)
-    if (cursor < next) return next
-    offset = next
-  }
-  return offset
 }

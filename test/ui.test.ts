@@ -13,42 +13,7 @@ import { renderFooter, renderHeader, type SessionTelemetry } from '../src/ui/sta
 import type { Glyphs, Theme } from '../src/ui/theme.ts'
 import { layoutTranscript, renderTranscript } from '../src/ui/transcript.ts'
 import { stringWidth } from '../src/term/width.ts'
-
-const theme: Theme = {
-  base: 'BASE',
-  dim: 'DIM',
-  subtle: 'SUBTLE',
-  text: 'TEXT',
-  accent: 'ACCENT',
-  user: 'USER',
-  assistant: 'ASSISTANT',
-  reasoning: 'REASONING',
-  tool: 'TOOL',
-  ok: 'OK',
-  warn: 'WARN',
-  error: 'ERROR',
-  running: 'RUNNING',
-  selected: 'SELECTED',
-  border: 'BORDER',
-  reset: 'RESET',
-}
-
-const glyphs: Glyphs = {
-  running: ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'],
-  idle: '○',
-  error: '✖',
-  user: '▸',
-  assistant: '◆',
-  reasoning: '·',
-  tool: '⚙',
-  approve: '⚠',
-  hline: '─',
-  vline: '│',
-  corner: { tl: '╭', tr: '╮', bl: '╰', br: '╯' },
-  tee: { left: '├', right: '┤', down: '┬', up: '┴' },
-  bar: '▎',
-  arrow: '›',
-}
+import { testTheme as theme, testGlyphs as glyphs } from './helpers/ui.ts'
 
 const host: HostDescription = {
   version: '0.1.0',
@@ -135,6 +100,7 @@ function session(id: string, extra: {
   pendingApproval?: PendingApproval
   unread?: number
   lastError?: string
+  harness?: SessionState['harness']
 } = {}): SessionState {
   const row: SessionState = {
     id,
@@ -156,6 +122,7 @@ function session(id: string, extra: {
   if (extra.pendingApprovals !== undefined) row.pendingApprovals = extra.pendingApprovals
   if (extra.pendingApproval !== undefined) row.pendingApproval = extra.pendingApproval
   if (extra.lastError !== undefined) row.lastError = extra.lastError
+  if (extra.harness !== undefined) row.harness = extra.harness
   return row
 }
 
@@ -888,6 +855,26 @@ describe('sidebar', () => {
       target.puts.some((p) => p.text.includes(glyphs.approve) && p.style === theme.accent),
       `expected ${glyphs.approve} in accent, got ${JSON.stringify(target.puts)}`,
     )
+  })
+
+  it('prefixes the session title with the PATH harness so a mixed crew is distinguishable', () => {
+    const rect: Rect = { row: 1, col: 1, width: 28, height: 3 }
+    const target = new BoundsTarget(rect)
+    renderSidebar(target, {
+      rect,
+      sessions: [
+        session('native', { title: 'native-work' }),
+        session('codex-1', { title: 'review', harness: 'codex' }),
+      ],
+      focusedId: 'codex-1',
+      theme,
+      glyphs,
+      spinnerFrame: 0,
+    })
+    const plain = target.plain()
+    assert.ok(plain.includes('codex'), `expected harness id in ${JSON.stringify(target.puts)}`)
+    assert.ok(plain.includes('review'))
+    assert.ok(plain.includes('native-work'))
   })
 })
 

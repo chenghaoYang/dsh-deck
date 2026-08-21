@@ -543,6 +543,7 @@ export type DeckCommandAction =
   | 'dashboard'
   | 'doctor'
   | 'vim'
+  | 'harness'
 
 export interface SlashCommandEntry extends CommandDescriptor {
   /** Deck-local chrome action; absent entries execute through commands/execute. */

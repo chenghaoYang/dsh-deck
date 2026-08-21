@@ -18,14 +18,21 @@ import {
   type SessionState,
   type StoreChange,
 } from '../model/store.ts'
-import type { HostDescription, SessionId } from '../protocol/contract.ts'
+import type { HostDescription, ResponseValue, RpcResult, SessionId } from '../protocol/contract.ts'
 import { detectCapabilities, type TerminalCapabilities } from '../term/capabilities.ts'
 import { Screen } from '../term/screen.ts'
 import { InputReader, type Key } from '../term/input.ts'
 import { TerminalIntegration } from '../term/ghostty.ts'
-import { graphemes, stringWidth } from '../term/width.ts'
+import {
+  graphemeBoundaryAtOrBefore,
+  graphemes,
+  nextGraphemeBoundary,
+  previousGraphemeBoundary,
+  stringWidth,
+} from '../term/width.ts'
 import { createGlyphs, createTheme, type Glyphs, type Theme } from './theme.ts'
 import { computeLayout, viewportTooSmall, type Layout } from './layout.ts'
+import { codePointLength, codePointSlice } from './render.ts'
 import { layoutTranscript, renderTranscript, type RenderedLine } from './transcript.ts'
 import { renderSidebar } from './sidebar.ts'
 import { renderComposer } from './composer.ts'
@@ -109,7 +116,20 @@ import type { AgentPresetEntry, AskUserQuestionAnswer, CommandDescriptor, Queued
 import { cursorTo, sgr } from '../term/ansi.ts'
 import { appendFileSync, readFileSync } from 'node:fs'
 import { spawn } from 'node:child_process'
-import { resolve } from 'node:path'
+import { homedir } from 'node:os'
+import { join, resolve } from 'node:path'
+import {
+  buildHarnessOverlay,
+  discoverHarnesses,
+  harnessLabel,
+  isHarnessId,
+  isSessionHarness,
+  spawnHarnessTurn,
+  harnessAssistantText,
+  type HarnessTurnResult,
+  type OverlayPlan,
+  type SessionHarness,
+} from '../harness.ts'
 
 /** Frame budget. 24fps is plenty for text and leaves the CPU alone while idle. */
 const FRAME_INTERVAL_MS = 42
@@ -121,7 +141,7 @@ const KEY_HINTS = [
   { key: 'tab', label: 'switch' },
   { key: '^k', label: 'sessions' },
   { key: '^\\', label: 'dashboard' },
-  { key: '^s', label: 'modes' },
+  { key: '^s', label: 'modes · harness' },
   { key: '^g', label: 'help' },
 ]
 
@@ -165,7 +185,8 @@ type Overlay =
 const DECK_COMMANDS: readonly SlashCommandEntry[] = [
   { name: 'model', description: 'Switch model and reasoning effort', action: 'model' },
   { name: 'effort', description: 'Adjust reasoning effort', action: 'model' },
-  { name: 'modes', description: 'Model, preset, permission, and plan', action: 'modes' },
+  { name: 'modes', description: 'Model, harness, preset, permission, and plan', action: 'modes' },
+  { name: 'harness', description: 'Switch the PATH coding harness for this session', action: 'harness' },
   { name: 'preset', description: 'Switch the agent preset', action: 'modes' },
   { name: 'permissions', description: 'Inspect or switch permission mode', action: 'modes' },
   { name: 'sessions', description: 'Search and switch sessions', action: 'sessions' },
@@ -220,7 +241,7 @@ const BINDINGS = [
   { keys: 'shift+drag', label: 'bypass deck — the terminal\u2019s own selection, always available' },
   { keys: 'ctrl+t', label: 'toggle mouse capture (off = native terminal selection)' },
   { keys: 'ctrl+n', label: 'new session in the current directory' },
-  { keys: 'ctrl+s', label: 'modes: model, agent preset, permission, plan' },
+  { keys: 'ctrl+s', label: 'modes: model, harness, agent preset, permission, plan' },
   { keys: 'ctrl+p', label: 'pick the model and reasoning effort' },
   { keys: 'ctrl+o', label: 'view the latest image inline (Kitty graphics)' },
   { keys: 'ctrl+f', label: 'fork the focused session' },
@@ -249,6 +270,8 @@ export interface DeckAppOptions {
   /** Write a transcript into the primary screen on exit. */
   printOnExit?: boolean
   env?: NodeJS.ProcessEnv
+  /** Tests inject a stub so a prompt never launches a real vendor CLI. */
+  runHarnessTurn?: (plan: OverlayPlan, signal?: AbortSignal) => Promise<HarnessTurnResult>
 }
 
 interface Message {
@@ -321,11 +344,17 @@ export class DeckApp {
   /** Sessions whose model selection has been asked for, so focus asks once. */
   private readonly modelFetched = new Set<SessionId>()
   private readonly subagentModes = new Map<SessionId, 'one-shot' | 'continuable'>()
+  /** Last harness chosen in the modes panel; applied to newly created sessions. */
+  private lastHarness: SessionHarness = 'dsh'
+  /** Live overlay CLI turns, so Ctrl+C / dashboard stop can kill the child. */
+  private readonly harnessTurns = new Map<SessionId, AbortController>()
 
   constructor(options: DeckAppOptions) {
     this.options = options
     const env = options.env ?? process.env
     this.vimMode = envFlag(env, 'DECK_VIM')
+    const prefs = loadPrefs(env)
+    if (prefs.lastHarness !== undefined) this.lastHarness = prefs.lastHarness
     this.caps = detectCapabilities(env)
     this.theme = createTheme(this.caps, env)
     this.glyphs = createGlyphs(env)
@@ -452,6 +481,9 @@ export class DeckApp {
     // open modes panel picks up its own switch from the host rather than
     // guessing what the switch did.
     if (kind === 'status' || kind === 'sessions') this.refreshModes()
+    // Archived rows stay addressable in the store; only removed sessions
+    // leak per-session caches if we do not drop them here.
+    if (kind === 'sessions') this.dropStaleSessionCaches()
     this.refreshLiveOverlays()
     if (kind === 'transcript' && 'sessionId' in change && change.sessionId !== this.store.focusedId) {
       if (this.overlay?.kind === 'dashboard') {
@@ -462,6 +494,15 @@ export class DeckApp {
       return
     }
     this.requestFrame()
+  }
+
+  private dropStaleSessionCaches(): void {
+    for (const id of this.sessionDrafts.keys()) {
+      if (this.store.get(id) === undefined) this.sessionDrafts.delete(id)
+    }
+    for (const id of this.subagentModes.keys()) {
+      if (this.store.get(id) === undefined) this.subagentModes.delete(id)
+    }
   }
 
   private refreshLiveOverlays(): void {
@@ -769,6 +810,7 @@ export class DeckApp {
       unread: s.unread,
       blocked: s.pendingApproval !== undefined || s.pendingQuestion !== undefined,
       updatedAt: s.updatedAt,
+      ...s.harness === undefined ? {} : { harness: harnessLabel(s.harness) },
     }))
   }
 
@@ -813,6 +855,27 @@ export class DeckApp {
     // rather than letting the user pick and collecting `agent-preset-locked`.
     const presetLocked = session.blank ? undefined : 'locked once the session has run a turn'
 
+    const currentHarness: SessionHarness = session.harness ?? 'dsh'
+    const harnessOptions = [
+      {
+        value: 'dsh',
+        label: 'dsh',
+        detail: 'DeepSeek Harness (host API)',
+        ...currentHarness === 'dsh' ? { current: true } : {},
+      },
+      ...this.harnessRows().map((row) => ({
+        value: row.id,
+        label: row.label,
+        detail: row.present
+          ? (row.resolvedName !== undefined && row.resolvedName !== row.id
+            ? `${row.binary ?? row.resolvedName} (${row.resolvedName})`
+            : (row.binary ?? 'on PATH'))
+          : 'not on PATH',
+        ...currentHarness === row.id ? { current: true } : {},
+        ...row.present ? {} : { disabled: 'not on PATH' },
+      })),
+    ]
+
     return [
       {
         id: 'model',
@@ -820,6 +883,13 @@ export class DeckApp {
         value: model === undefined
           ? 'host default'
           : `${model.provider} · ${shortModelId(model.model)}${model.effort === undefined ? '' : ` · ${model.effort}`}`,
+      },
+      {
+        id: 'harness',
+        label: 'harness',
+        value: harnessLabel(currentHarness),
+        optionsTitle: 'harness',
+        options: harnessOptions,
       },
       {
         id: 'agent',
@@ -863,7 +933,33 @@ export class DeckApp {
     this.overlay = { ...this.overlay, state: updateModesRows(this.overlay.state, this.modeRows(session)) }
   }
 
+  private harnessRows() {
+    return discoverHarnesses({ env: this.options.env ?? process.env })
+  }
+
+  private chooseHarness(sessionId: SessionId, value: string): void {
+    if (!isSessionHarness(value)) {
+      this.notice(`unknown harness ${value}`, 'error')
+      return
+    }
+    if (value !== 'dsh') {
+      const row = this.harnessRows().find((item) => item.id === value)
+      if (row === undefined || !row.present) {
+        this.notice(`${value} is not on PATH`, 'error')
+        return
+      }
+    }
+    this.store.setHarness(sessionId, value === 'dsh' ? undefined : value)
+    this.lastHarness = value
+    savePrefs({ lastHarness: value }, this.options.env ?? process.env)
+    this.notice(`harness: ${harnessLabel(value)}`, 'info')
+  }
+
   private async chooseMode(sessionId: SessionId, row: ModeRowId, value: string): Promise<void> {
+    if (row === 'harness') {
+      this.chooseHarness(sessionId, value)
+      return
+    }
     if (row === 'agent') {
       const result = await this.client.call('agentPreset.select', { sessionId, agentPreset: value })
       if (!result.ok) this.notice(`agent preset: ${result.error.message}`, 'error')
@@ -1415,6 +1511,7 @@ export class DeckApp {
     switch (action) {
       case 'model': void this.openPicker(); return
       case 'modes': void this.openModes(); return
+      case 'harness': void this.openModes(); return
       case 'sessions': this.openSwitcher(); return
       case 'clear': {
         const focused = this.focused()
@@ -1486,6 +1583,7 @@ export class DeckApp {
     this.openInfo('status', [
       `Project: ${this.projectOf(session)}`,
       `Session: ${this.titleOf(session)} (${session.id})`,
+      `Harness: ${session.harness === undefined ? 'dsh' : harnessLabel(session.harness)}`,
       `State: ${session.running ? 'running' : 'idle'} · queued ${String(session.queue.length)} · unread ${String(session.unread)}`,
       `Model: ${model === undefined ? 'host default' : `${model.provider}/${model.model}${model.effort === undefined ? '' : ` · ${model.effort}`}`}`,
       `Preset: ${session.modes.agentPreset ?? 'default'}`,
@@ -1731,6 +1829,7 @@ export class DeckApp {
         ...model === undefined ? {} : { model: `${model.provider}/${model.model}` },
         items: session.transcript.items,
         ...tool === undefined ? {} : { pendingTool: tool },
+        ...session.harness === undefined ? {} : { harness: harnessLabel(session.harness) },
       }
     })
   }
@@ -1774,6 +1873,7 @@ export class DeckApp {
   private async promptSession(sessionId: SessionId, text: string, mode: 'queue' | 'steer'): Promise<boolean> {
     const session = this.store.get(sessionId)
     if (session === undefined) return false
+    if (session.harness !== undefined) return this.promptHarness(session, text)
     const childMode = await this.subagentMode(session)
     if (session.origin === 'subagent' && childMode !== 'continuable') {
       this.notice('one-shot subagents are read-only after completion', 'warn')
@@ -1800,6 +1900,78 @@ export class DeckApp {
       return false
     }
     return true
+  }
+
+  private async promptHarness(session: SessionState, text: string): Promise<boolean> {
+    const harness = session.harness
+    if (harness === undefined) return false
+    const env = this.options.env ?? process.env
+    const row = this.harnessRows().find((item) => item.id === harness)
+    if (row === undefined || !row.present || row.binary === undefined) {
+      this.notice(`${harnessLabel(harness)} is not on PATH`, 'error')
+      return false
+    }
+    if (session.modes.model === undefined) await this.loadModelSelection(session.id)
+    const model = this.store.get(session.id)?.modes.model
+    if (model === undefined) {
+      this.notice('select a dsh model first (ctrl+s / ctrl+p) — Deck will pass it to the harness', 'warn')
+      return false
+    }
+    const selection = {
+      provider: model.provider,
+      model: model.model,
+      ...model.effort === undefined ? {} : { effort: model.effort },
+    }
+    const plan = buildHarnessOverlay({
+      harness,
+      binary: row.binary,
+      selection,
+      overlayHome: overlayHomeFor(env, harness, session.id),
+      env,
+      cwd: session.cwd ?? this.options.cwd,
+      prompt: text,
+    })
+    const ac = new AbortController()
+    this.harnessTurns.set(session.id, ac)
+    this.store.setRunning(session.id, true)
+    this.notice(`${harnessLabel(harness)} · ${model.provider}/${shortModelId(model.model)}`, 'info')
+    try {
+      const run = this.options.runHarnessTurn ?? (
+        (overlay: OverlayPlan, signal?: AbortSignal) => (
+          signal === undefined
+            ? spawnHarnessTurn(overlay)
+            : spawnHarnessTurn(overlay, { signal })
+        )
+      )
+      const result = await run(plan, ac.signal)
+      if (result.aborted === true || ac.signal.aborted) {
+        this.store.setRunning(session.id, false)
+        return false
+      }
+      if (result.code !== 0) {
+        const err = result.stderr.trim() || result.stdout.trim() || `${harnessLabel(harness)} exited ${String(result.code)}`
+        this.store.appendHarnessTurn(session.id, { user: text, error: err })
+        this.notice(err, 'error')
+        return false
+      }
+      const assistant = harnessAssistantText(harness, result.stdout)
+      this.store.appendHarnessTurn(session.id, {
+        user: text,
+        assistant: assistant.length > 0 ? assistant : '(empty)',
+      })
+      return true
+    } catch (error) {
+      if (ac.signal.aborted) {
+        this.store.setRunning(session.id, false)
+        return false
+      }
+      const message = error instanceof Error ? error.message : String(error)
+      this.store.appendHarnessTurn(session.id, { user: text, error: message })
+      this.notice(message, 'error')
+      return false
+    } finally {
+      this.harnessTurns.delete(session.id)
+    }
   }
 
   private async editQueuedMessage(itemId: string, text: string): Promise<void> {
@@ -2215,8 +2387,17 @@ export class DeckApp {
       running: false,
       blank: false,
     }])
+    if (this.lastHarness !== 'dsh' && isHarnessId(this.lastHarness)) {
+      const available = this.harnessRows().some((row) => row.id === this.lastHarness && row.present)
+      if (available) this.store.setHarness(result.value.sessionId, this.lastHarness)
+    }
     if (options?.focus !== false) this.focus(result.value.sessionId)
-    this.notice('new session', 'info')
+    this.notice(
+      this.lastHarness === 'dsh'
+        ? 'new session'
+        : `new session · ${harnessLabel(this.lastHarness)}`,
+      'info',
+    )
     return result.value.sessionId
   }
 
@@ -2264,6 +2445,16 @@ export class DeckApp {
       return
     }
     this.sendMode = mode
+    if (focused.harness !== undefined) {
+      const ok = await this.promptHarness(focused, text)
+      if (!ok && this.store.focusedId === focused.id && this.draftRevision === clearedRevision) {
+        this.draft = originalDraft
+        this.cursor = originalCursor
+        this.draftRevision += 1
+        this.requestFrame()
+      }
+      return
+    }
     const childMode = await this.subagentMode(focused)
     if (focused.origin === 'subagent' && childMode !== 'continuable') {
       this.draft = originalDraft
@@ -2358,8 +2549,15 @@ export class DeckApp {
       this.notice('no running turn to interrupt', 'info')
       return
     }
+    if (session.harness !== undefined) {
+      const pending = this.harnessTurns.get(sessionId)
+      pending?.abort()
+      this.store.setRunning(sessionId, false)
+      this.notice('cancelled', 'info')
+      return
+    }
     const childMode = await this.subagentMode(session)
-    let result: RpcCallResult<'subagent.interrupt'> | RpcCallResult<'session.cancel'>
+    let result: RpcResult<ResponseValue<'subagent.interrupt'>> | RpcResult<ResponseValue<'session.cancel'>>
     if (session.origin === 'subagent') {
       const parentSessionId = session.parentSessionId
       if (parentSessionId === undefined || childMode !== 'continuable') {
@@ -2491,6 +2689,7 @@ export class DeckApp {
       ...permissions === undefined ? {} : { permission: permissions.currentValue },
       ...plan === undefined ? {} : { plan },
       ...preset === undefined ? {} : { preset },
+      ...session.harness === undefined ? {} : { harness: harnessLabel(session.harness) },
     }
   }
 
@@ -2921,7 +3120,7 @@ function mergeCommandCatalog(
 ): SlashCommandEntry[] {
   const out: SlashCommandEntry[] = []
   const seen = new Set<string>()
-  const firstScreen = new Set(['model', 'modes', 'sessions', 'dashboard', 'new'])
+  const firstScreen = new Set(['model', 'modes', 'harness', 'sessions', 'dashboard', 'new'])
   const ordered = [
     ...locals.filter((command) => firstScreen.has(normalizedCommandName(command.name))),
     ...host,
@@ -2937,49 +3136,16 @@ function mergeCommandCatalog(
   return out
 }
 
-function codePointLength(text: string): number {
-  return [...text].length
-}
-
-function codePointSlice(text: string, start: number, end?: number): string {
-  return [...text].slice(start, end).join('')
-}
-
-/** Cursor indices stay code-point based for the renderer, but movement is grapheme based. */
-function previousGraphemeBoundary(text: string, cursor: number): number {
-  let offset = 0
-  for (const cluster of graphemes(text)) {
-    const next = offset + codePointLength(cluster)
-    if (cursor <= next) return offset
-    offset = next
-  }
-  return offset
-}
-
-function graphemeBoundaryAtOrBefore(text: string, cursor: number): number {
-  let offset = 0
-  for (const cluster of graphemes(text)) {
-    const next = offset + codePointLength(cluster)
-    if (cursor < next) return offset
-    offset = next
-  }
-  return offset
-}
-
-function nextGraphemeBoundary(text: string, cursor: number): number {
-  let offset = 0
-  for (const cluster of graphemes(text)) {
-    const next = offset + codePointLength(cluster)
-    if (cursor < next) return next
-    offset = next
-  }
-  return offset
-}
-
 /**
  * `thinkingmachines/inkling` reads as `inkling`. The vendor prefix is the same
  * on every model from one route and the route is already shown beside it.
  */
+function overlayHomeFor(env: NodeJS.ProcessEnv, harness: string, sessionId: string): string {
+  const home = env.DECK_HOME
+  const root = typeof home === 'string' && home.length > 0 ? home : join(homedir(), '.deck')
+  return join(root, 'harness', harness, sessionId)
+}
+
 function shortModelId(model: string): string {
   const cut = model.lastIndexOf('/')
   return cut === -1 ? model : model.slice(cut + 1)

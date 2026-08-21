@@ -16,7 +16,7 @@ credentials; it is the fast terminal control surface in front of them.
 [![CI](https://github.com/chenghaoYang/dsh-deck/actions/workflows/ci.yml/badge.svg)](https://github.com/chenghaoYang/dsh-deck/actions/workflows/ci.yml)
 ![node](https://img.shields.io/badge/node-%3E%3D22.19-brightgreen)
 ![dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)
-![tests](https://img.shields.io/badge/tests-260+-brightgreen)
+![tests](https://img.shields.io/badge/tests-380+-brightgreen)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 ## Quick start
@@ -81,7 +81,7 @@ questions, and the telemetry projections nobody documented.
 
 <table>
 <tr><td><b>One screen, many agents</b></td><td>The sidebar stays scoped to the current project; <code>ctrl+k</code> remains the global switcher; <code>ctrl+\</code> is the dashboard — peek and reply without switching.</td></tr>
-<tr><td><b>Every dsh mode, one panel</b></td><td><code>ctrl+s</code>: model, reasoning effort, agent preset, permissions, and plan mode.</td></tr>
+<tr><td><b>Every dsh mode, one panel</b></td><td><code>ctrl+s</code>: model, reasoning effort, PATH harness (hermes / Codex / Claude Code / Pi / fx / Kimi), agent preset, permissions, and plan mode.</td></tr>
 <tr><td><b>Actually interactive</b></td><td>Click to focus, drag to copy, wheel to scroll, <code>ctrl+k</code> to fuzzy-switch sessions.</td></tr>
 <tr><td><b>Terminal-native</b></td><td>Taskbar progress, desktop notifications, prompt marks — each capability-gated. Images open with <code>ctrl+o</code> as a Kitty overlay, not inline in the transcript.</td></tr>
 <tr><td><b>Verified on a real terminal</b></td><td>Unit tests, a protocol e2e, and a live PTY run that drives the real binary against a real model.</td></tr>
@@ -122,11 +122,15 @@ stopped and is waiting on you.
   replaces whatever was accumulated from deltas, so a reconnect mid-turn shows
   the true message rather than a truncated one.
 - **Every dsh mode on one panel.** `ctrl+s` switches the model and reasoning
-  effort, the agent preset, the permission preset, and plan mode. One-shot
+  effort, the PATH coding harness (hermes, Codex, Claude Code, Pi, fx, Kimi),
+  the agent preset, the permission preset, and plan mode. One-shot
   actions such as `/compact` stay in the slash-command palette. The header
   keeps the safety-relevant modes visible: `read-only`
   and `full-access` get saturated color, because "which permissions is this
   agent running with" is not a question you should have to go looking for.
+  A harness session is labeled in the sidebar; Deck injects the current dsh
+  model/provider/effort for that run and keeps the product's own home
+  (`~/.codex`, `~/.claude`, …) untouched. `deck --harness` lists what is on PATH.
 - **Terminal-native touches**, each capability-gated and a no-op where
   unsupported: progress in the tab/taskbar while an agent works, a desktop
   notification when an agent needs you, clipboard copy of an answer straight out
@@ -265,10 +269,19 @@ keys in that file:
 
 ```yaml
 NVIDIA_API_KEY: nvapi-…
+ARK_PLAN_API_KEY: ark-…
 ```
 
 Then run `chmod 600 "${DSH_HOME:-$HOME/.dsh}/.credentials.yaml"`; the harness
 refuses to boot when the credentials file is readable by other users.
+
+Volcengine Agent Plan is a separate credential from the older Volcengine Ark
+UUID often exported as `ARK_API_KEY` (Codex `volcark`). Native Host sessions
+use the OpenAI-compatible route `https://ark.cn-beijing.volces.com/api/plan/v3`
+with `apiKeyEnv: ARK_PLAN_API_KEY`. PATH harnesses that speak Anthropic
+(Claude Code) use `https://ark.cn-beijing.volces.com/api/plan` on the same
+`ark-…` key. A UUID in `ARK_API_KEY` 401s against Agent Plan if it is allowed
+to win, so keep that name for Ark and put the Plan key in `ARK_PLAN_API_KEY`.
 
 Verified end to end this way against NVIDIA NIM with `thinkingmachines/inkling`:
 streamed reasoning, multi-step turns with real tool calls, prompt-cache hits,
@@ -323,7 +336,7 @@ parks in the transcript (`j`/`k` `g`/`G`), and `i` returns to INSERT.
 | `tab` | next session |
 | `alt+1`…`alt+9` | jump to a session |
 | `ctrl+n` | new session |
-| `ctrl+s` | modes: model, agent preset, permission, plan |
+| `ctrl+s` | modes: model, harness, agent preset, permission, plan |
 | `ctrl+p` | model and reasoning effort |
 | `ctrl+k` | session manager: search, archive, rename, or create |
 | `ctrl+\` | dashboard: peek, reply, dispatch; `ctrl+/` search, `ctrl+t` pin, `ctrl+g` group, `ctrl+r` rename, `ctrl+x` stop |
@@ -366,6 +379,7 @@ show it.
 ```
 ╭─ modes ──────────────────────────────────────────────────────╮
 │› model      nvidia · inkling · high                          │
+│  harness    dsh                                              │
 │  agent      标准模式 locked once the session has run a turn  │
 │  permission workspace-write                                  │
 │  plan       off                                              │
@@ -387,6 +401,7 @@ including a change someone made from the web UI.
 | Row | Reaches the host as |
 |---|---|
 | model | `session.selectModel`, with the model's own reasoning efforts |
+| harness | PATH overlay (Deck-owned home + dsh model); `dsh` stays on the Host API |
 | agent | `agentPreset.select`, blank sessions only |
 | permission | `/permission <preset>` |
 | plan | `/plan` and `/plan off` |

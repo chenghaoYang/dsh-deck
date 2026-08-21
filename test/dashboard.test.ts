@@ -19,42 +19,7 @@ import {
 import type { Rect } from '../src/ui/layout.ts'
 import type { RenderTarget } from '../src/ui/render.ts'
 import type { Glyphs, Theme } from '../src/ui/theme.ts'
-
-const theme: Theme = {
-  base: 'BASE',
-  dim: 'DIM',
-  subtle: 'SUBTLE',
-  text: 'TEXT',
-  accent: 'ACCENT',
-  user: 'USER',
-  assistant: 'ASSISTANT',
-  reasoning: 'REASONING',
-  tool: 'TOOL',
-  ok: 'OK',
-  warn: 'WARN',
-  error: 'ERROR',
-  running: 'RUNNING',
-  selected: 'SELECTED',
-  border: 'BORDER',
-  reset: 'RESET',
-}
-
-const glyphs: Glyphs = {
-  running: ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'],
-  idle: '○',
-  error: '✖',
-  user: '▸',
-  assistant: '◆',
-  reasoning: '·',
-  tool: '⚙',
-  approve: '⚠',
-  hline: '─',
-  vline: '│',
-  corner: { tl: '╭', tr: '╮', bl: '╰', br: '╯' },
-  tee: { left: '├', right: '┤', down: '┬', up: '┴' },
-  bar: '▎',
-  arrow: '›',
-}
+import { testTheme as theme, testGlyphs as glyphs } from './helpers/ui.ts'
 
 class BoundsTarget implements RenderTarget {
   readonly puts: { row: number; col: number; text: string; style: string }[] = []
@@ -108,6 +73,7 @@ function session(id: string, extra: {
   model?: string
   items?: readonly TranscriptItem[]
   pendingTool?: string
+  harness?: string
 } = {}): DashboardSession {
   const row: DashboardSession = {
     id,
@@ -122,6 +88,7 @@ function session(id: string, extra: {
   if (extra.lastError !== undefined) row.lastError = extra.lastError
   if (extra.model !== undefined) row.model = extra.model
   if (extra.pendingTool !== undefined) row.pendingTool = extra.pendingTool
+  if (extra.harness !== undefined) row.harness = extra.harness
   return row
 }
 
@@ -740,6 +707,24 @@ describe('dashboard rename, stop, esc', () => {
     if (archived.kind !== 'archive') return
     assert.equal(archived.id, 'alpha')
     assert.equal(archived.state.stopArmedId, undefined)
+  })
+
+  it('search matches harness so a mixed crew is filterable', () => {
+    const start = createDashboard([
+      session('a', { title: 'review', harness: 'codex', updatedAt: 2 }),
+      session('b', { title: 'review', harness: 'hermes', updatedAt: 1 }),
+    ], 'a')
+    const searching = mustContinue(reduceDashboard(start, { kind: 'ctrl', char: '/' }))
+    const typed = feed(searching, [
+      { kind: 'char', char: 'h' },
+      { kind: 'char', char: 'e' },
+      { kind: 'char', char: 'r' },
+      { kind: 'enter' },
+    ])
+    const next = mustContinue(typed)
+    const rows = visibleDashboardRows(next).filter((row) => row.kind === 'session')
+    assert.equal(rows.length, 1)
+    if (rows[0]?.kind === 'session') assert.equal(rows[0].session.id, 'b')
   })
 
   it('Esc from a session row goes to cursor 0; second Esc cancels', () => {

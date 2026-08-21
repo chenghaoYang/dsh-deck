@@ -227,12 +227,16 @@ async function promptAndWaitTurn(client, mux, sessionId, text, timeoutMs) {
 }
 
 async function startHost(port, cwd, env, logPath) {
-  const log = createWriteStream(logPath, { flags: 'a' })
+  // Fresh tempdir per run: 'w' states the intent — never accumulate old hosts.
+  const log = createWriteStream(logPath, { flags: 'w' })
   const child = spawn('dsh', ['web', '--no-open', '--port', String(port)], {
     cwd,
     env,
     stdio: ['ignore', 'pipe', 'pipe'],
   })
+  // Close the log with the child so buffered output is flushed and the
+  // stream cannot hold the event loop after the host is gone.
+  child.once('exit', () => log.end())
   let output = ''
   const onData = (chunk) => {
     const text = chunk.toString()

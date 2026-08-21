@@ -12,6 +12,7 @@ import { createWriteStream, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DeckApp } from './ui/app.ts'
+import { discoverHarnesses, formatHarnessList } from './harness.ts'
 
 /** Source runs from src/, the published build from lib/src/ — probe both. */
 function packageVersion(): string {
@@ -38,6 +39,7 @@ interface Args {
   spawnHost: boolean
   help: boolean
   version: boolean
+  harness: boolean
 }
 
 const USAGE = `deck — a terminal-native multi-agent cockpit for DeepSeek Harness
@@ -50,6 +52,7 @@ options:
   --cwd <dir>        working directory for sessions Deck creates (default: current directory)
   --no-spawn         never start a host; fail if none is reachable
   --no-print         do not write a transcript to the scrollback on exit
+  --harness          list PATH harnesses (present/missing) and exit
   -h, --help         show this help
   -v, --version      show the version
 
@@ -74,6 +77,7 @@ function parseArgs(argv: readonly string[]): Args {
     spawnHost: true,
     help: false,
     version: false,
+    harness: false,
   }
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]
@@ -104,6 +108,7 @@ function parseArgs(argv: readonly string[]): Args {
       case '--no-spawn': args.spawnHost = false; break
       case '-h': case '--help': args.help = true; break
       case '-v': case '--version': args.version = true; break
+      case '--harness': args.harness = true; break
       default:
         if (arg !== undefined && arg.startsWith('-')) throw new Error(`unknown option ${arg}`)
     }
@@ -184,9 +189,12 @@ async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2))
   if (args.help) { process.stdout.write(USAGE); return }
   if (args.version) { process.stdout.write(`dsh-deck ${packageVersion()}\n`); return }
+  if (args.harness) {
+    process.stdout.write(`${formatHarnessList(discoverHarnesses({ env: process.env }))}\n`)
+    return
+  }
 
   const baseUrl = args.attach ?? `http://127.0.0.1:${String(args.port)}`
-  let spawned: SpawnedHost | undefined
   let appStarted = false
   let stopSpawnedHost: (() => void) | undefined
   const signalExitCodes: Record<'SIGINT' | 'SIGTERM' | 'SIGHUP', number> = {
@@ -222,7 +230,7 @@ async function main(): Promise<void> {
       }
       process.stdout.write(`deck: starting a dsh host on port ${String(args.port)}…\n`)
       try {
-        spawned = await startHost(args.port, args.cwd, (stop) => { stopSpawnedHost = stop })
+        await startHost(args.port, args.cwd, (stop) => { stopSpawnedHost = stop })
       } catch (error) {
         process.stderr.write(`deck: ${error instanceof Error ? error.message : String(error)}\n`)
         process.stderr.write('deck: is `dsh` installed? try `npm i -g @deepseek-ai/dsh@next`\n')
@@ -240,7 +248,9 @@ async function main(): Promise<void> {
     appStarted = true
     await app.start()
   } finally {
-    spawned?.stop()
+    // stopSpawnedHost is the only stop handle: startHost registers it via the
+    // registrar, so there is exactly one function to call (kill is idempotent
+    // anyway, but a single handle keeps the lifecycle legible).
     stopSpawnedHost?.()
     for (const [signal, handler] of signalHandlers) process.removeListener(signal, handler)
   }

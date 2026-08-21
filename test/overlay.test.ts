@@ -36,42 +36,7 @@ import {
   type RewindOverlayResult,
   type RewindOverlayState,
 } from '../src/ui/overlay.ts'
-
-const theme: Theme = {
-  base: 'BASE',
-  dim: 'DIM',
-  subtle: 'SUBTLE',
-  text: 'TEXT',
-  accent: 'ACCENT',
-  user: 'USER',
-  assistant: 'ASSISTANT',
-  reasoning: 'REASONING',
-  tool: 'TOOL',
-  ok: 'OK',
-  warn: 'WARN',
-  error: 'ERROR',
-  running: 'RUNNING',
-  selected: 'SELECTED',
-  border: 'BORDER',
-  reset: 'RESET',
-}
-
-const glyphs: Glyphs = {
-  running: ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'],
-  idle: '○',
-  error: '✖',
-  user: '▸',
-  assistant: '◆',
-  reasoning: '·',
-  tool: '⚙',
-  approve: '⚠',
-  hline: '─',
-  vline: '│',
-  corner: { tl: '╭', tr: '╮', bl: '╰', br: '╯' },
-  tee: { left: '├', right: '┤', down: '┬', up: '┴' },
-  bar: '▎',
-  arrow: '›',
-}
+import { testTheme as theme, testGlyphs as glyphs } from './helpers/ui.ts'
 
 class BoundsTarget implements RenderTarget {
   readonly puts: { row: number; col: number; text: string; style: string }[] = []

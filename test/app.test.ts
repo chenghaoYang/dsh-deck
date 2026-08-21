@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
-import { mkdtempSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import type { ModesState } from '../src/ui/modes.ts'
+import type { OverlayPlan } from '../src/harness.ts'
 
 import { DeckApp } from '../src/ui/app.ts'
 import { DeckStore } from '../src/model/store.ts'
@@ -41,6 +43,7 @@ interface AppInternals {
   loadOlderHistory(id: string): Promise<void>
   cancel(): Promise<void>
   runDeckCommand(action: DeckCommandAction, input?: string): void
+  openModes(): Promise<void>
   send(mode: 'queue' | 'steer'): Promise<void>
   openSkills(): Promise<void>
   openAgents(): Promise<void>
@@ -1025,5 +1028,185 @@ describe('DeckApp subagent routing', () => {
     assert.ok(calls.some((call) => call.method === 'subagent.prompt'))
     assert.ok(calls.some((call) => call.method === 'subagent.interrupt'))
     assert.ok(!calls.some((call) => call.method === 'session.history' || call.method === 'session.prompt' || call.method === 'session.cancel'))
+  })
+})
+
+describe('DeckApp harness switching', () => {
+  function fakePath(): { env: NodeJS.ProcessEnv; dir: string } {
+    const dir = mkdtempSync(join(tmpdir(), 'deck-app-harness-'))
+    const bin = join(dir, 'bin')
+    mkdirSync(bin, { recursive: true })
+    for (const name of ['hermes', 'codex', 'claude', 'kimi', 'fx']) {
+      const path = join(bin, name)
+      writeFileSync(path, '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+      chmodSync(path, 0o755)
+    }
+    return {
+      dir,
+      env: { PATH: bin, DECK_HOME: join(dir, 'home'), HOME: join(dir, 'user') },
+    }
+  }
+
+  it('modes panel exposes harness ids; choosing one records it on the session', async () => {
+    const { env } = fakePath()
+    const app = new DeckApp({ baseUrl: 'http://127.0.0.1:3080', cwd: '/work', env })
+    const view = internals(app)
+    view.store.applySessionList([{
+      sessionId: 'session-1', cwd: '/work', updatedAt: 1, running: false, blank: false,
+    }])
+    view.store.focus('session-1')
+    view.client.call = async (method) => {
+      if (method === 'agentPreset.list') return { ok: true, value: { presets: [] } }
+      throw new Error(`unexpected ${method}`)
+    }
+
+    await view.openModes()
+    const overlay = view.overlay as { kind?: string; state?: ModesState } | undefined
+    assert.equal(overlay?.kind, 'modes')
+    const state = overlay?.state
+    assert.ok(state !== undefined)
+    const harnessRow = state.rows.find((row) => row.id === 'harness')
+    assert.ok(harnessRow !== undefined)
+    const values = (harnessRow.options ?? []).map((opt) => opt.value)
+    for (const id of ['dsh', 'hermes', 'codex', 'claudecode', 'pi', 'fx', 'kimicode']) {
+      assert.ok(values.includes(id), `missing option ${id}`)
+    }
+    const codex = (harnessRow.options ?? []).find((opt) => opt.value === 'codex')
+    assert.equal(codex?.disabled, undefined)
+    const pi = (harnessRow.options ?? []).find((opt) => opt.value === 'pi')
+    assert.ok(pi?.disabled !== undefined)
+
+    view.onOverlayKey(view.overlay, { kind: 'down' })
+    view.onOverlayKey(view.overlay, { kind: 'enter' })
+    view.onOverlayKey(view.overlay, { kind: 'down' })
+    view.onOverlayKey(view.overlay, { kind: 'down' })
+    view.onOverlayKey(view.overlay, { kind: 'enter' })
+    assert.equal(view.store.get('session-1')?.harness, 'codex')
+  })
+
+  it('send on a harness session uses the overlay runner, not session.prompt', async () => {
+    const { env } = fakePath()
+    const plans: OverlayPlan[] = []
+    const app = new DeckApp({
+      baseUrl: 'http://127.0.0.1:3080',
+      cwd: '/work',
+      env,
+      runHarnessTurn: async (plan) => {
+        plans.push(plan)
+        return { stdout: 'overlay-ok', stderr: '', code: 0 }
+      },
+    })
+    const view = internals(app)
+    view.store.applySessionList([{
+      sessionId: 'session-1', cwd: '/work', updatedAt: 1, running: false, blank: false,
+    }])
+    view.store.focus('session-1')
+    view.store.setHarness('session-1', 'codex')
+    view.store.applyModelSelection('session-1', {
+      provider: 'deepseek-official',
+      model: 'deepseek-v4-flash',
+      effort: 'high',
+    })
+    const calls: string[] = []
+    view.client.call = async (method) => {
+      calls.push(method)
+      throw new Error(`unexpected ${method}`)
+    }
+    view.draft = 'review this'
+    view.cursor = view.draft.length
+    await view.send('queue')
+    assert.equal(calls.length, 0)
+    assert.equal(plans.length, 1)
+    const plan = plans[0]
+    assert.ok(plan !== undefined)
+    assert.equal(plan.harness, 'codex')
+    assert.equal(plan.env.DECK_HARNESS_MODEL, 'deepseek-v4-flash')
+    assert.equal(plan.env.DECK_HARNESS_PROVIDER, 'deepseek-official')
+    assert.equal(plan.env.DECK_HARNESS_EFFORT, 'high')
+    assert.notEqual(plan.env, process.env)
+    assert.ok(plan.argv.includes('deepseek-v4-flash'))
+    const items = view.store.get('session-1')?.transcript.items ?? []
+    assert.equal(items.some((item) => item.kind === 'user' && item.text === 'review this'), true)
+    assert.equal(items.some((item) => item.kind === 'assistant' && item.text === 'overlay-ok'), true)
+  })
+
+  it('records fx ask JSON as the answer, not the envelope', async () => {
+    const { env } = fakePath()
+    const app = new DeckApp({
+      baseUrl: 'http://127.0.0.1:3080',
+      cwd: '/work',
+      env,
+      runHarnessTurn: async () => ({
+        stdout: '{"output":"parsed fx answer","usage":{}}\n',
+        stderr: '',
+        code: 0,
+      }),
+    })
+    const view = internals(app)
+    view.store.applySessionList([{
+      sessionId: 'session-1', cwd: '/work', updatedAt: 1, running: false, blank: false,
+    }])
+    view.store.focus('session-1')
+    view.store.setHarness('session-1', 'fx')
+    view.store.applyModelSelection('session-1', {
+      provider: 'deepseek-official',
+      model: 'deepseek-v4-flash',
+    })
+    view.draft = 'what broke'
+    view.cursor = view.draft.length
+    await view.send('queue')
+    const items = view.store.get('session-1')?.transcript.items ?? []
+    assert.equal(items.some((item) => item.kind === 'assistant' && item.text === 'parsed fx answer'), true)
+    assert.equal(items.some((item) => item.kind === 'assistant' && item.text.includes('"output"')), false)
+  })
+
+  it('cancelSession aborts an overlay turn and does not RPC session.cancel', async () => {
+    const { env } = fakePath()
+    let started: () => void = () => {}
+    const sawStart = new Promise<void>((resolveStart) => {
+      started = resolveStart
+    })
+    let aborted = false
+    const app = new DeckApp({
+      baseUrl: 'http://127.0.0.1:3080',
+      cwd: '/work',
+      env,
+      runHarnessTurn: (_plan, signal) => new Promise((resolveTurn) => {
+        started()
+        const finish = (): void => {
+          aborted = true
+          resolveTurn({ stdout: '', stderr: '', code: null, aborted: true })
+        }
+        if (signal?.aborted === true) {
+          finish()
+          return
+        }
+        signal?.addEventListener('abort', finish, { once: true })
+      }),
+    })
+    const view = internals(app)
+    view.store.applySessionList([{
+      sessionId: 'session-1', cwd: '/work', updatedAt: 1, running: false, blank: false,
+    }])
+    view.store.focus('session-1')
+    view.store.setHarness('session-1', 'codex')
+    view.store.applyModelSelection('session-1', {
+      provider: 'nvidia',
+      model: 'inkling',
+    })
+    const calls: string[] = []
+    view.client.call = async (method) => {
+      calls.push(method)
+      throw new Error(`unexpected ${method}`)
+    }
+    view.draft = 'long task'
+    view.cursor = view.draft.length
+    const sending = view.send('queue')
+    await sawStart
+    await view.cancel()
+    await sending
+    assert.equal(aborted, true)
+    assert.ok(!calls.includes('session.cancel'))
+    assert.equal(view.store.get('session-1')?.running, false)
   })
 })

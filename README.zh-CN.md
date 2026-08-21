@@ -18,7 +18,7 @@ Deck 不替代 DeepSeek Harness，也不自行管理模型密钥。Harness 负�
 [![CI](https://github.com/chenghaoYang/dsh-deck/actions/workflows/ci.yml/badge.svg)](https://github.com/chenghaoYang/dsh-deck/actions/workflows/ci.yml)
 ![node](https://img.shields.io/badge/node-%3E%3D22.19-brightgreen)
 ![dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)
-![tests](https://img.shields.io/badge/tests-260+-brightgreen)
+![tests](https://img.shields.io/badge/tests-380+-brightgreen)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 ## 适合什么场景
@@ -161,6 +161,7 @@ deck
 
 ```yaml
 NVIDIA_API_KEY: nvapi-…
+ARK_PLAN_API_KEY: ark-…
 ```
 
 不要覆盖文件中已有的其他 provider 密钥。保存后设置权限：
@@ -168,6 +169,8 @@ NVIDIA_API_KEY: nvapi-…
 ```sh
 chmod 600 "${DSH_HOME:-$HOME/.dsh}/.credentials.yaml"
 ```
+
+火山引擎 Agent Plan 和常被写成 `ARK_API_KEY` 的火山方舟 UUID（Codex `volcark`）不是同一把钥匙。Host 走 OpenAI 兼容地址 `https://ark.cn-beijing.volces.com/api/plan/v3`，`apiKeyEnv` 必须是 `ARK_PLAN_API_KEY`；Claude Code 这类 Anthropic 协议的 PATH harness 走 `https://ark.cn-beijing.volces.com/api/plan`，用同一把 `ark-…` 密钥。如果让 UUID 形态的 `ARK_API_KEY` 抢先，请求会 401。
 
 ### 配置 OpenAI-compatible Provider
 
@@ -316,7 +319,7 @@ Deck 会自动切换到下一个会话；没有其他会话时会创建一个新
 | `Alt+1`…`Alt+9` | 跳转到指定会话。 |
 | `Ctrl+K` | 会话管理器。 |
 | `Ctrl+\` | 驾驶舱：窥看、回复、派发；`Ctrl+/` 搜索、`Ctrl+T` 固定、`Ctrl+G` 分组、`Ctrl+R` 重命名、`Ctrl+X` 停止/归档。 |
-| `Ctrl+S` | 模型、预设、权限和 Plan 模式面板。`/compact` 只在 slash 命令中。 |
+| `Ctrl+S` | 模型、PATH harness（hermes / Codex / Claude Code / Pi / fx / Kimi）、预设、权限和 Plan 模式面板。`/compact` 只在 slash 命令中。`deck --harness` 列出本机是否安装。 |
 | `Ctrl+P` | 模型和推理强度选择器。 |
 | `Ctrl+N` | 新建会话。 |
 | `Ctrl+F` | Fork 当前会话。 |

@@ -22,9 +22,9 @@ const SLOW_REASONING_MS = 8_000
 const TOOL_ARGS = JSON.stringify({ command: 'ls -la', description: 'List all files' })
 
 /** bash schema: sandbox_permissions ∈ {workspace-write, danger-full-access}; default mode is workspace-write so only danger-full-access is strictly wider. */
-export const ESCALATE_SANDBOX_PERMISSIONS = 'danger-full-access'
-export const ESCALATE_JUSTIFICATION = 'Need full access to retry a command the workspace-write sandbox would deny outside the workspace.'
-export const ESCALATE_ARGS = JSON.stringify({
+const ESCALATE_SANDBOX_PERMISSIONS = 'danger-full-access'
+const ESCALATE_JUSTIFICATION = 'Need full access to retry a command the workspace-write sandbox would deny outside the workspace.'
+const ESCALATE_ARGS = JSON.stringify({
   command: 'echo escalated-outside-workspace',
   description: 'Echo after sandbox escalation',
   sandbox_permissions: ESCALATE_SANDBOX_PERMISSIONS,
@@ -34,8 +34,8 @@ export const ESCALATE_ARGS = JSON.stringify({
 /** Model-facing ask_user_question args (multi_select is the schema name; mux frames use multiSelect). */
 export const ASK_QUESTION_ID = 'q_proceed'
 export const ASK_OPTION_CONTINUE = 'Continue'
-export const ASK_OPTION_STOP = 'Stop'
-export const ASK_ARGS = JSON.stringify({
+const ASK_OPTION_STOP = 'Stop'
+const ASK_ARGS = JSON.stringify({
   questions: [{
     id: ASK_QUESTION_ID,
     question: 'Should the agent continue after this checkpoint?',

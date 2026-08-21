@@ -727,3 +727,35 @@ describe('archived sessions', () => {
     assert.equal(hidden?.historyLoaded, false)
   })
 })
+
+describe('session harness identity', () => {
+  it('setHarness survives host list frames and resetLiveState', async () => {
+    const store = new DeckStore()
+    store.applySessionList([summary('s1', { cwd: '/work' })])
+    store.setHarness('s1', 'codex')
+    assert.equal(store.get('s1')?.harness, 'codex')
+
+    store.applySessionList([summary('s1', { cwd: '/work', updatedAt: 2 })])
+    assert.equal(store.get('s1')?.harness, 'codex')
+
+    store.resetLiveState()
+    await flush()
+    assert.equal(store.get('s1')?.harness, 'codex')
+
+    store.setHarness('s1', undefined)
+    assert.equal(store.get('s1')?.harness, undefined)
+  })
+
+  it('appendHarnessTurn records a local user/assistant pair without host seqs', () => {
+    const store = new DeckStore()
+    store.applySessionList([summary('s1')])
+    store.setHarness('s1', 'hermes')
+    store.appendHarnessTurn('s1', { user: 'ping', assistant: 'pong', time: 9 })
+    const items = store.get('s1')?.transcript.items ?? []
+    assert.equal(items[0]?.kind, 'user')
+    if (items[0]?.kind === 'user') assert.equal(items[0].text, 'ping')
+    assert.equal(items[1]?.kind, 'assistant')
+    if (items[1]?.kind === 'assistant') assert.equal(items[1].text, 'pong')
+    assert.equal(store.get('s1')?.running, false)
+  })
+})

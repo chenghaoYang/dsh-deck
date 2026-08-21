@@ -42,6 +42,8 @@ export interface DashboardSession {
   /** Latest transcript items, oldest first. Peek reads from the end. */
   items: readonly TranscriptItem[]
   pendingTool?: string
+  /** PATH harness id when this session is not native dsh. */
+  harness?: string
 }
 
 export interface DashboardOptions {
@@ -567,7 +569,8 @@ function sessionMatches(session: DashboardSession, query: string): boolean {
     return sessionKind(session) === want
   }
   const cwd = session.cwd ?? ''
-  return `${session.title} ${cwd}`.toLowerCase().includes(lower)
+  const harness = session.harness ?? ''
+  return `${session.title} ${cwd} ${harness}`.toLowerCase().includes(lower)
 }
 
 function canonicalState(token: string): 'blocked' | 'running' | 'error' | 'idle' | undefined {
@@ -769,7 +772,10 @@ function sessionRow(
   const badge = unreadBadge(session.unread)
   const pinned = state.pinned.includes(session.id)
   const renaming = state.focus === 'rename' && selected
-  const title = renaming ? state.renameDraft : session.title
+  const harnessTag = !renaming && session.harness !== undefined && session.harness.length > 0
+    ? `${session.harness} · `
+    : ''
+  const title = renaming ? state.renameDraft : `${harnessTag}${session.title}`
 
   const pinW = pinned ? stringWidth('* ') : 0
   const leftFixed = stringWidth(mark) + stringWidth(glyph) + 1 + pinW
@@ -852,12 +858,16 @@ function peekHeader(session: DashboardSession, innerW: number, theme: Theme): Ov
     }
   }
 
-  if (session.model !== undefined && session.model.length > 0) {
-    const model = truncate(session.model, Math.max(0, innerW - used - 1))
-    const mw = stringWidth(model)
-    if (mw > 0 && used + 1 + mw <= innerW) {
-      spans.push({ text: ' '.repeat(innerW - used - mw), style: '' })
-      spans.push({ text: model, style: theme.dim })
+  const rightBits: string[] = []
+  if (session.harness !== undefined && session.harness.length > 0) rightBits.push(session.harness)
+  if (session.model !== undefined && session.model.length > 0) rightBits.push(session.model)
+  const right = rightBits.join(' · ')
+  if (right.length > 0) {
+    const shown = truncate(right, Math.max(0, innerW - used - 1))
+    const rw = stringWidth(shown)
+    if (rw > 0 && used + 1 + rw <= innerW) {
+      spans.push({ text: ' '.repeat(innerW - used - rw), style: '' })
+      spans.push({ text: shown, style: session.harness !== undefined ? theme.accent : theme.dim })
     }
   }
 

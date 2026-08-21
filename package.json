@@ -11,6 +11,14 @@
     "terminal"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chenghaoYang/dsh-deck.git"
+  },
+  "homepage": "https://github.com/chenghaoYang/dsh-deck#readme",
+  "bugs": {
+    "url": "https://github.com/chenghaoYang/dsh-deck/issues"
+  },
   "type": "module",
   "engines": {
     "node": ">=22.19.0"
@@ -34,7 +42,7 @@
   ],
   "//": "scripts/ is intentionally not published: pty-bridge.py and verify-live.mjs are development tools, not runtime dependencies.",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json",
     "prepare": "npm run build",
     "start": "node --experimental-strip-types src/cli.ts",
     "dev": "node --experimental-strip-types --watch src/cli.ts",

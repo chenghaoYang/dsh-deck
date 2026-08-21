@@ -26,6 +26,8 @@ export interface ModeSummary {
   preset?: string
   /** Plan mode. */
   plan?: { active: boolean; pending: boolean }
+  /** PATH harness short label when not native dsh. */
+  harness?: string
 }
 
 export interface HeaderProps {
@@ -221,6 +223,9 @@ function modeGroups(
 ): ClusterGroup[] {
   // Visual LTR = most important → least. fitGroups pops from the right.
   const groups: ClusterGroup[] = [...safetyChipGroups(modes, theme)]
+
+  const harness = modes.harness?.trim() ?? ''
+  if (harness.length > 0) groups.push({ segs: [{ text: harness, style: theme.accent }] })
 
   const variants = modelLabelVariants(modelParts(modes, host), theme.subtle)
   const longest = variants[0]
